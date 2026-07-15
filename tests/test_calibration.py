@@ -26,13 +26,38 @@ def test_hom_fit_recovers_synthetic_parameters():
     assert fit.width == pytest.approx(25e-12, abs=4e-12)
     assert fit.r_squared > 0.98
 
+    corrected = opt.fit_hom_dip(delays, measured, background=20)
+    assert corrected.visibility == pytest.approx(0.91, abs=0.035)
+    intervals = corrected.confidence_intervals(0.95)
+    assert intervals["visibility"][0] <= corrected.visibility <= intervals["visibility"][1]
+
+
+def test_hom_poisson_bootstrap_returns_empirical_intervals():
+    rng = np.random.default_rng(44)
+    delays = np.linspace(-80e-12, 80e-12, 41)
+    expected = 8 + 500 * (1 - 0.86 * np.exp(-(delays**2) / (2 * (22e-12) ** 2)))
+    measured = rng.poisson(expected)
+    bootstrap = opt.bootstrap_hom_fit(
+        delays, measured, background=8, samples=12, confidence_level=0.9, seed=45
+    )
+    assert bootstrap.successful_samples >= 10
+    assert bootstrap.parameter_samples.shape[1] == 4
+    assert bootstrap.intervals["visibility"][0] < bootstrap.intervals["visibility"][1]
+
 
 def test_loss_estimation_and_validation():
     loss = opt.estimate_loss(1000, 405, detector_efficiency=0.9, passes=2)
     assert loss.total_transmission == pytest.approx(0.45)
     assert loss.per_pass_transmission == pytest.approx(np.sqrt(0.45))
+    assert loss.transmission_interval[0] < loss.total_transmission
+    assert loss.transmission_interval[1] > loss.total_transmission
     with pytest.raises(opt.ValidationError):
         opt.estimate_loss(100, 101)
+
+
+def test_accidental_coincidence_rate_uses_full_window():
+    expected = opt.estimate_accidental_coincidences(100_000, 80_000, 2e-9, 10)
+    assert expected == pytest.approx(160.0)
 
 
 def test_loss_localization_finds_dominant_interval():
