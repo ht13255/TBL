@@ -103,6 +103,53 @@ def from_sparameters(
     return LinearOpticalCircuit.from_transfer_matrix(matrix, name)
 
 
+def from_sparameter_sweep(
+    wavelengths: Sequence[float],
+    sparameters: Mapping[tuple[str, str], complex | Sequence[complex] | np.ndarray],
+    *,
+    ports: Sequence[str] | None = None,
+    normalize_passive: bool = False,
+    extrapolate: bool = False,
+    name: str = "sparameter_sweep",
+) -> LinearOpticalCircuit:
+    """Import wavelength-resolved GDSFactory/SAX S-parameters.
+
+    Every non-scalar S-parameter value must have one sample per wavelength.
+    Scalars are broadcast, which is useful for ports known to be flat over the
+    measured band.
+    """
+
+    wavelength_array = np.asarray(wavelengths, dtype=float)
+    if wavelength_array.ndim != 1 or wavelength_array.size < 2:
+        raise ValidationError("wavelength sweep needs at least two samples")
+    if not sparameters:
+        raise ValidationError("S-parameter mapping cannot be empty")
+    if ports is None:
+        ports = sorted({port for pair in sparameters for port in pair})
+    indices = {port: index for index, port in enumerate(ports)}
+    matrices = np.zeros((wavelength_array.size, len(ports), len(ports)), dtype=complex)
+    for (output, input_), value in sparameters.items():
+        if output not in indices or input_ not in indices:
+            continue
+        array = np.asarray(value, dtype=complex)
+        if array.ndim == 0:
+            array = np.full(wavelength_array.size, array.item(), dtype=complex)
+        if array.shape != wavelength_array.shape:
+            raise ValidationError(
+                f"S-parameter {(output, input_)!r} does not match wavelength grid"
+            )
+        matrices[:, indices[output], indices[input_]] = array
+    for index, matrix in enumerate(matrices):
+        largest = float(np.max(np.linalg.svd(matrix, compute_uv=False)))
+        if largest > 1 + 1e-9:
+            if not normalize_passive:
+                raise ValidationError(f"S-parameters imply gain at wavelength index {index}")
+            matrices[index] /= largest
+    return LinearOpticalCircuit.from_spectral_transfer(
+        wavelength_array, matrices, name=name, extrapolate=extrapolate
+    )
+
+
 def from_sax_model(
     model: Callable[..., Mapping[tuple[str, str], complex | Sequence[complex]]],
     *,
