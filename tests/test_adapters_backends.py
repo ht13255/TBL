@@ -21,6 +21,22 @@ def test_sparameter_import_and_batch_cpu_backend():
     assert np.sum(abs(output) ** 2, axis=1) == pytest.approx([1, 1])
 
 
+def test_sparameter_sweep_preserves_wavelength_dependence():
+    wavelengths = np.array([1540e-9, 1560e-9])
+    circuit = opt.from_sparameter_sweep(
+        wavelengths,
+        {
+            ("a", "a"): [1, 0],
+            ("b", "a"): [0, 1],
+            ("a", "b"): [0, 1],
+            ("b", "b"): [1, 0],
+        },
+        ports=["a", "b"],
+    )
+    assert circuit.transfer_matrix(wavelength=1540e-9) == pytest.approx(np.eye(2))
+    assert circuit.transfer_matrix(wavelength=1560e-9) == pytest.approx(np.array([[0, 1], [1, 0]]))
+
+
 def test_sax_callable_and_nonpassive_validation():
     def model(coupling=0.5):
         return {("a", "a"): coupling, ("b", "a"): np.sqrt(1 - coupling**2)}
