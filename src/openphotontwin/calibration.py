@@ -8,7 +8,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, minimize
+from scipy.stats import beta, norm
 
 from .detectors import TimeTag
 from .errors import SimulationError, ValidationError
@@ -46,6 +47,55 @@ class HOMFit:
     def indistinguishability(self) -> float:
         return self.visibility
 
+    @property
+    def standard_errors(self) -> Mapping[str, float]:
+        values = np.sqrt(np.maximum(np.diag(self.covariance), 0.0))
+        names = ("baseline", "visibility", "center", "width")
+        return {name: float(value) for name, value in zip(names, values, strict=True)}
+
+    def confidence_intervals(
+        self, confidence_level: float = 0.95
+    ) -> Mapping[str, tuple[float, float]]:
+        """Return local asymptotic confidence intervals from fit covariance."""
+
+        if not 0 < confidence_level < 1:
+            raise ValidationError("confidence_level must be in (0, 1)")
+        z_score = float(norm.ppf(0.5 + confidence_level / 2))
+        parameters = {
+            "baseline": self.baseline,
+            "visibility": self.visibility,
+            "center": self.center,
+            "width": self.width,
+        }
+        intervals = {
+            name: (
+                value - z_score * self.standard_errors[name],
+                value + z_score * self.standard_errors[name],
+            )
+            for name, value in parameters.items()
+        }
+        intervals["visibility"] = (
+            max(0.0, intervals["visibility"][0]),
+            min(1.0, intervals["visibility"][1]),
+        )
+        intervals["baseline"] = (
+            max(0.0, intervals["baseline"][0]),
+            intervals["baseline"][1],
+        )
+        intervals["width"] = (
+            max(0.0, intervals["width"][0]),
+            intervals["width"][1],
+        )
+        return intervals
+
+
+@dataclass(frozen=True, slots=True)
+class HOMBootstrap:
+    confidence_level: float
+    intervals: Mapping[str, tuple[float, float]]
+    parameter_samples: np.ndarray
+    successful_samples: int
+
 
 @dataclass(frozen=True, slots=True)
 class LossEstimate:
@@ -53,6 +103,9 @@ class LossEstimate:
     per_pass_transmission: float
     total_loss: float
     loss_db: float
+    confidence_level: float | None = None
+    transmission_interval: tuple[float, float] | None = None
+    per_pass_interval: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,8 +227,20 @@ def _hom_model(
     )
 
 
-def fit_hom_dip(delays: Sequence[float], coincidences: Sequence[float]) -> HOMFit:
-    """Fit a Gaussian HOM dip using bounded nonlinear least squares."""
+def fit_hom_dip(
+    delays: Sequence[float],
+    coincidences: Sequence[float],
+    *,
+    background: float = 0.0,
+    method: str = "poisson",
+) -> HOMFit:
+    """Fit a Gaussian HOM dip with a fixed accidental/background level.
+
+    Poisson maximum likelihood is the default for coincidence counts. Use
+    ``method='least_squares'`` for normalized Gaussian observations. Background
+    and intrinsic visibility are not jointly identifiable from a HOM scan, so
+    background is a measured input rather than a free fit parameter.
+    """
 
     x = np.asarray(delays, dtype=float)
     y = np.asarray(coincidences, dtype=float)
@@ -183,6 +248,10 @@ def fit_hom_dip(delays: Sequence[float], coincidences: Sequence[float]) -> HOMFi
         raise ValidationError("HOM fitting needs at least five paired samples")
     if np.any(y < 0) or not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)):
         raise ValidationError("HOM samples must be finite and non-negative")
+    if background < 0 or not np.isfinite(background):
+        raise ValidationError("background must be finite and non-negative")
+    if method not in {"poisson", "least_squares"}:
+        raise ValidationError("method must be 'poisson' or 'least_squares'")
     span = float(np.ptp(x))
     if span <= 0:
         raise ValidationError("HOM delays must span a non-zero interval")
@@ -192,51 +261,132 @@ def fit_hom_dip(delays: Sequence[float], coincidences: Sequence[float]) -> HOMFi
     origin = float(np.mean(x))
     scaled_x = (x - origin) / span
     edge = max(1, x.size // 5)
-    baseline_guess = max(float(np.mean(np.r_[y[:edge], y[-edge:]])), np.finfo(float).eps)
-    background_guess = max(0.0, float(np.min(y)) * 0.05)
-    visibility_guess = float(np.clip(1 - np.min(y) / baseline_guess, 0.01, 0.99))
+    far_level = float(np.mean(np.r_[y[:edge], y[-edge:]]))
+    baseline_guess = max(far_level - background, np.finfo(float).eps)
+    visibility_guess = float(
+        np.clip(
+            1 - max(float(np.min(y)) - background, 0.0) / baseline_guess,
+            0.01,
+            0.99,
+        )
+    )
     center_guess = float(scaled_x[np.argmin(y)])
-    p0 = [baseline_guess, visibility_guess, center_guess, 1 / 6, background_guess]
-    lower = [0.0, 0.0, float(np.min(scaled_x) - 1), 1 / 10_000, 0.0]
+    p0 = [baseline_guess, visibility_guess, center_guess, 1 / 6]
+    lower = [0.0, 0.0, float(np.min(scaled_x) - 1), 1 / 10_000]
     upper = [
         max(float(np.max(y)) * 10, 1.0),
         1.0,
         float(np.max(scaled_x) + 1),
         10.0,
-        max(float(np.max(y)) * 2, 1.0),
     ]
-    sigma = np.sqrt(np.maximum(y, 1.0))
-    try:
-        parameters, covariance = curve_fit(
-            _hom_model,
-            scaled_x,
-            y,
-            p0=p0,
-            bounds=(lower, upper),
-            sigma=sigma,
-            absolute_sigma=True,
-            maxfev=100_000,
+
+    def model(delay, baseline, visibility, center, width):
+        return _hom_model(delay, baseline, visibility, center, width, background)
+
+    if method == "poisson":
+
+        def objective(parameters: np.ndarray) -> float:
+            expected = np.maximum(model(scaled_x, *parameters), np.finfo(float).tiny)
+            return float(np.sum(expected - y * np.log(expected)))
+
+        optimization = minimize(
+            objective,
+            np.asarray(p0),
+            method="Nelder-Mead",
+            bounds=list(zip(lower, upper, strict=True)),
+            options={"maxiter": 100_000, "xatol": 1e-11, "fatol": 1e-8},
         )
-    except (RuntimeError, ValueError) as exc:
-        raise SimulationError(f"HOM fit did not converge: {exc}") from exc
-    fitted = _hom_model(scaled_x, *parameters)
+        if not optimization.success:
+            raise SimulationError(f"Poisson HOM fit did not converge: {optimization.message}")
+        parameters = optimization.x
+        fitted = np.maximum(model(scaled_x, *parameters), np.finfo(float).tiny)
+        baseline, visibility, center_scaled, width_scaled = parameters
+        exponent = np.exp(-((scaled_x - center_scaled) ** 2) / (2 * width_scaled**2))
+        derivatives = np.column_stack(
+            [
+                1 - visibility * exponent,
+                -baseline * exponent,
+                -baseline * visibility * exponent * (scaled_x - center_scaled) / width_scaled**2,
+                -baseline
+                * visibility
+                * exponent
+                * (scaled_x - center_scaled) ** 2
+                / width_scaled**3,
+            ]
+        )
+        fisher = derivatives.T @ (derivatives / fitted[:, None])
+        covariance = np.linalg.pinv(fisher, hermitian=True)
+    else:
+        sigma = np.sqrt(np.maximum(y, 1.0))
+        try:
+            parameters, covariance = curve_fit(
+                model,
+                scaled_x,
+                y,
+                p0=p0,
+                bounds=(lower, upper),
+                sigma=sigma,
+                absolute_sigma=True,
+                maxfev=100_000,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise SimulationError(f"HOM fit did not converge: {exc}") from exc
+        fitted = model(scaled_x, *parameters)
     residuals = y - fitted
     denominator = float(np.sum((y - np.mean(y)) ** 2))
     r_squared = 1 - float(np.sum(residuals**2)) / denominator if denominator else 1.0
     center = float(parameters[2] * span + origin)
     width = abs(float(parameters[3] * span))
-    jacobian = np.diag([1.0, 1.0, span, span, 1.0])
+    jacobian = np.diag([1.0, 1.0, span, span])
     covariance = jacobian @ covariance @ jacobian
     return HOMFit(
         float(parameters[0]),
         float(parameters[1]),
         center,
         width,
-        float(parameters[4]),
+        float(background),
         covariance,
         fitted,
         r_squared,
     )
+
+
+def bootstrap_hom_fit(
+    delays: Sequence[float],
+    coincidences: Sequence[float],
+    *,
+    background: float = 0.0,
+    samples: int = 200,
+    confidence_level: float = 0.95,
+    seed: int | None = None,
+) -> HOMBootstrap:
+    """Parametric Poisson bootstrap for nonlinear HOM uncertainty."""
+
+    if samples < 10:
+        raise ValidationError("bootstrap requires at least ten samples")
+    if not 0 < confidence_level < 1:
+        raise ValidationError("confidence_level must be in (0, 1)")
+    nominal = fit_hom_dip(delays, coincidences, background=background, method="poisson")
+    rng = np.random.default_rng(seed)
+    estimates: list[list[float]] = []
+    for _ in range(samples):
+        resampled = rng.poisson(np.maximum(nominal.fitted, 0.0))
+        try:
+            fitted = fit_hom_dip(delays, resampled, background=background, method="poisson")
+        except SimulationError:
+            continue
+        estimates.append([fitted.baseline, fitted.visibility, fitted.center, fitted.width])
+    if len(estimates) < max(10, samples // 2):
+        raise SimulationError("too few bootstrap HOM fits converged")
+    parameter_samples = np.asarray(estimates)
+    tail = (1 - confidence_level) / 2
+    quantiles = np.quantile(parameter_samples, [tail, 1 - tail], axis=0)
+    names = ("baseline", "visibility", "center", "width")
+    intervals = {
+        name: (float(quantiles[0, index]), float(quantiles[1, index]))
+        for index, name in enumerate(names)
+    }
+    return HOMBootstrap(confidence_level, intervals, parameter_samples, len(estimates))
 
 
 def estimate_loss(
@@ -245,20 +395,72 @@ def estimate_loss(
     *,
     detector_efficiency: float = 1.0,
     passes: int = 1,
+    confidence_level: float = 0.95,
 ) -> LossEstimate:
-    """Estimate optical transmission after correcting detector efficiency."""
+    """Estimate transmission with an exact binomial confidence interval."""
 
     if input_count <= 0 or output_count < 0 or passes < 1:
         raise ValidationError("counts must be physical and passes at least one")
     if not 0 < detector_efficiency <= 1:
         raise ValidationError("detector_efficiency must be in (0, 1]")
+    if not 0 < confidence_level < 1:
+        raise ValidationError("confidence_level must be in (0, 1)")
     transmission = output_count / (input_count * detector_efficiency)
     if transmission > 1 + 1e-9:
         raise ValidationError("corrected output exceeds input; check counts or detector efficiency")
     transmission = float(np.clip(transmission, 0.0, 1.0))
     per_pass = transmission ** (1 / passes)
     loss_db = float(-10 * np.log10(transmission)) if transmission > 0 else float("inf")
-    return LossEstimate(transmission, per_pass, 1 - transmission, loss_db)
+    transmission_interval = None
+    per_pass_interval = None
+    integer_counts = float(input_count).is_integer() and float(output_count).is_integer()
+    if integer_counts and output_count <= input_count:
+        trials, successes = int(input_count), int(output_count)
+        alpha = 1 - confidence_level
+        observed_lower = (
+            0.0 if successes == 0 else float(beta.ppf(alpha / 2, successes, trials - successes + 1))
+        )
+        observed_upper = (
+            1.0
+            if successes == trials
+            else float(beta.ppf(1 - alpha / 2, successes + 1, trials - successes))
+        )
+        transmission_interval = (
+            float(np.clip(observed_lower / detector_efficiency, 0.0, 1.0)),
+            float(np.clip(observed_upper / detector_efficiency, 0.0, 1.0)),
+        )
+        per_pass_interval = (
+            transmission_interval[0] ** (1 / passes),
+            transmission_interval[1] ** (1 / passes),
+        )
+    return LossEstimate(
+        transmission,
+        per_pass,
+        1 - transmission,
+        loss_db,
+        confidence_level,
+        transmission_interval,
+        per_pass_interval,
+    )
+
+
+def estimate_accidental_coincidences(
+    rate_a: float,
+    rate_b: float,
+    coincidence_window: float,
+    acquisition_time: float,
+) -> float:
+    """Expected accidentals for independent stationary Poisson time tags.
+
+    ``coincidence_window`` is the full accepted relative-delay width. Rates are
+    counts/s and both time inputs use seconds.
+    """
+
+    if min(rate_a, rate_b, coincidence_window, acquisition_time) < 0:
+        raise ValidationError(
+            "rates, coincidence window, and acquisition time must be non-negative"
+        )
+    return float(rate_a * rate_b * coincidence_window * acquisition_time)
 
 
 def locate_loss(
@@ -345,6 +547,9 @@ def auto_calibrate(
     output_count: float | None = None,
     detector_efficiency: float = 1.0,
     passes: int = 1,
+    hom_background: float = 0.0,
+    hom_method: str = "poisson",
+    confidence_level: float = 0.95,
 ) -> CalibrationResult:
     """Run all estimators supported by the supplied experimental data."""
 
@@ -354,7 +559,7 @@ def auto_calibrate(
     if delays is not None or coincidences is not None:
         if delays is None or coincidences is None:
             raise ValidationError("delays and coincidences must be supplied together")
-        hom = fit_hom_dip(delays, coincidences)
+        hom = fit_hom_dip(delays, coincidences, background=hom_background, method=hom_method)
     if input_count is not None or output_count is not None:
         if input_count is None or output_count is None:
             raise ValidationError("input_count and output_count must be supplied together")
@@ -363,6 +568,7 @@ def auto_calibrate(
             output_count,
             detector_efficiency=detector_efficiency,
             passes=passes,
+            confidence_level=confidence_level,
         )
     if ideal_coincidences is not None:
         if coincidences is None:
@@ -382,6 +588,8 @@ def calibration_report(result: CalibrationResult) -> Mapping[str, float]:
             hom_center=result.hom.center,
             hom_width=result.hom.width,
             hom_r_squared=result.hom.r_squared,
+            hom_visibility_standard_error=result.hom.standard_errors["visibility"],
+            hom_center_standard_error=result.hom.standard_errors["center"],
         )
     if result.loss:
         report.update(
@@ -390,6 +598,11 @@ def calibration_report(result: CalibrationResult) -> Mapping[str, float]:
             total_loss=result.loss.total_loss,
             loss_db=result.loss.loss_db,
         )
+        if result.loss.transmission_interval is not None:
+            report.update(
+                transmission_interval_lower=result.loss.transmission_interval[0],
+                transmission_interval_upper=result.loss.transmission_interval[1],
+            )
     if result.comparison:
         report.update(
             rmse=result.comparison.rmse,
