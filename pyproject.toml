@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openphotontwin"
-version = "1.0.0"
+version = "1.1.0"
 description = "Time-resolved digital twin for time-bin and fiber-loop quantum photonics"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,8 +30,8 @@ gpu = ["cupy>=13"]
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.5"]
 
 [project.urls]
-Homepage = "https://github.com/openphotontwin/openphotontwin"
-Documentation = "https://github.com/openphotontwin/openphotontwin#readme"
+Homepage = "https://github.com/ht13255/TBL"
+Documentation = "https://github.com/ht13255/TBL#readme"
 
 [tool.setuptools.packages.find]
 where = ["src"]
