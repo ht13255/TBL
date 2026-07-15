@@ -37,6 +37,28 @@ def test_fiber_loop_roundtrip_schedule_and_length_error():
     assert output[0].time == pytest.approx(20.02e-9)
 
 
+def test_fiber_loop_applies_db_loss_dispersion_and_records_provenance():
+    rng = np.random.default_rng(21)
+    context = opt.SimulationContext(10e-9)
+    events = [event(shot=index) for index in range(40_000)]
+    loop = opt.FiberLoop(
+        10e-9,
+        transmission=1,
+        outcoupling=1,
+        fiber_length=1000,
+        attenuation_db_per_km=0.2,
+        insertion_loss_db=1.0,
+        dispersion_beta2=-21e-27,
+        max_roundtrips=1,
+    )
+    output = loop.process(events, rng, context)
+    expected_transmission = 10 ** (-1.2 / 10)
+    assert len(output) / len(events) == pytest.approx(expected_transmission, abs=0.006)
+    assert output[0].photon.wavepacket.temporal_width > events[0].photon.wavepacket.temporal_width
+    assert output[0].metadata["loop_effective_transmission"] == pytest.approx(expected_transmission)
+    assert output[0].metadata["loop_gdd_s2"] == pytest.approx(-21e-24)
+
+
 def test_feedforward_latency_and_eom_switch():
     rng = np.random.default_rng(3)
     context = opt.SimulationContext(1e-9)
@@ -57,6 +79,14 @@ def test_feedforward_rise_time_and_temperature_phase():
     )
     output = component.process([event(1e-9)], np.random.default_rng(1), opt.SimulationContext(1e-9))
     assert np.angle(output[0].amplitude) != pytest.approx(0.0)
+
+
+def test_wiener_phase_is_common_at_equal_time_and_correlated():
+    component = opt.PhaseDrift(standard_deviation=0.2, reference_time=1e-6)
+    events = [event(1e-6, mode=0), event(1e-6, mode=1), event(2e-6, mode=0)]
+    output = component.process(events, np.random.default_rng(8), opt.SimulationContext(1e-9))
+    assert output[0].amplitude == pytest.approx(output[1].amplitude)
+    assert output[2].amplitude != pytest.approx(output[0].amplitude)
 
 
 def test_dynamic_beam_splitter_switching_ramp():
@@ -85,6 +115,60 @@ def test_snspd_efficiency_dark_counts_jitter_and_dead_time():
     assert [(tag.time, tag.channel) for tag in tags] == [(1e-9, 2), (8e-9, 2)]
 
 
+def test_snspd_pixels_latency_quantization_and_avalanche_metadata():
+    detector = opt.SNSPD(
+        efficiency=1,
+        jitter=0,
+        dead_time=10e-9,
+        channel=3,
+        number_resolving=True,
+        detection_latency=0.3e-9,
+        time_tagger_resolution=1e-9,
+    )
+    tags = detector.detect(
+        [event(1.2e-9), event(1.2e-9)],
+        acquisition_start=0,
+        acquisition_end=20e-9,
+        rng=np.random.default_rng(33),
+    )
+    assert len(tags) == 2
+    assert all(tag.time == pytest.approx(2e-9) for tag in tags)
+    assert {tag.metadata["detector_pixel"] for tag in tags} == {0, 1}
+    assert all(tag.metadata["true_time_s"] == pytest.approx(1.2e-9) for tag in tags)
+
+
+def test_snspd_recovery_afterpulse_and_wavelength_efficiency():
+    rejecting = opt.SNSPD(
+        efficiency=1,
+        jitter=0,
+        dead_time=0,
+        wavelength_efficiency=lambda wavelength: 0.0,
+    )
+    assert not rejecting.detect(
+        [event(1e-9)],
+        acquisition_start=0,
+        acquisition_end=2e-9,
+        rng=np.random.default_rng(1),
+    )
+
+    detector = opt.SNSPD(
+        efficiency=1,
+        jitter=0,
+        dead_time=0,
+        recovery_time=0,
+        afterpulse_probability=0.7,
+        afterpulse_time_constant=2e-9,
+    )
+    tags = detector.detect(
+        [event(1e-9)],
+        acquisition_start=0,
+        acquisition_end=30e-9,
+        rng=np.random.default_rng(4),
+    )
+    assert tags[0].metadata["event_type"] == "photon"
+    assert any(tag.metadata["event_type"] == "afterpulse" for tag in tags)
+
+
 def test_digital_twin_end_to_end_and_reproducibility():
     source = opt.SinglePhotonSource(repetition_rate=1e6, p_single=1)
     detectors = opt.DetectorArray({0: opt.SNSPD(efficiency=1, jitter=0, dead_time=0)})
@@ -94,6 +178,31 @@ def test_digital_twin_end_to_end_and_reproducibility():
     assert first.time_tags == second.time_tags
     assert len(first.time_tags) == 20
     assert first.photon_number_distribution == {1: 1.0}
+
+
+def test_default_acquisition_window_includes_propagation_tail():
+    source = opt.SinglePhotonSource(repetition_rate=1e9, p_single=1)
+    detector = opt.DetectorArray({0: opt.SNSPD(efficiency=1, jitter=0, dead_time=0)})
+    twin = opt.DigitalTwin(source, [opt.DelayLine(20e-9)], detector)
+    result = twin.run(1, seed=2)
+    assert len(result.time_tags) == 1
+    assert result.time_tags[0].time == pytest.approx(20e-9)
+
+
+def test_correlated_source_digital_twin_resets_hidden_state_for_seed():
+    source = opt.CorrelatedPhotonSource(
+        repetition_rate=2e6,
+        mean_photon_number=0.6,
+        blink_on_to_off=0.05,
+        blink_off_to_on=0.2,
+        spectral_diffusion_std=1e9,
+        spectral_correlation_time=2e-6,
+    )
+    detectors = opt.DetectorArray({0: opt.SNSPD(efficiency=1, jitter=0, dead_time=0)})
+    twin = opt.DigitalTwin(source, [], detectors)
+    first = twin.run(1000, seed=18)
+    second = twin.run(1000, seed=18)
+    assert first.time_tags == second.time_tags
 
 
 def test_thermo_optic_phase_has_expected_sign():
