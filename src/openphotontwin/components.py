@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import pi, sqrt
 from typing import Protocol
 
@@ -280,12 +280,17 @@ class EOMSwitch:
     rise_time: float = 0.0
     control_latency: float = 0.0
     extinction_ratio_db: float = 40.0
+    transmission: float = 1.0
+    drive_noise_std: float = 0.0
 
     def __post_init__(self) -> None:
         if self.mode_a == self.mode_b or min(self.mode_a, self.mode_b) < 0:
             raise ValidationError("switch modes must be distinct and non-negative")
         if self.rise_time < 0 or self.control_latency < 0 or self.extinction_ratio_db < 0:
             raise ValidationError("switch timing and extinction ratio must be non-negative")
+        _probability("transmission", self.transmission)
+        if self.drive_noise_std < 0:
+            raise ValidationError("drive_noise_std cannot be negative")
 
     def _control_value(self, time: float) -> float:
         query_time = time - self.control_latency
@@ -308,7 +313,10 @@ class EOMSwitch:
             if event.mode not in (self.mode_a, self.mode_b):
                 result.append(event.copy())
                 continue
-            control = float(np.clip(self._control_value(event.time), 0.0, 1.0))
+            if rng.random() >= self.transmission:
+                continue
+            noise = rng.normal(0.0, self.drive_noise_std) if self.drive_noise_std else 0.0
+            control = float(np.clip(self._control_value(event.time) + noise, 0.0, 1.0))
             switch_probability = leakage + (1 - 2 * leakage) * control
             if rng.random() < switch_probability:
                 target = self.mode_b if event.mode == self.mode_a else self.mode_a
@@ -320,11 +328,17 @@ class EOMSwitch:
 
 @dataclass(frozen=True, slots=True)
 class PhaseDrift:
-    """Wiener-like phase drift applied independently to each event."""
+    """Time-correlated Wiener phase drift.
+
+    ``standard_deviation`` is the RMS phase accumulated over
+    ``reference_time``. Events at the same time see exactly the same phase.
+    Set ``independent_by_mode`` when distinct paths have independent baths.
+    """
 
     standard_deviation: float
     reference_time: float = 1.0
     modes: frozenset[int] | None = None
+    independent_by_mode: bool = False
 
     def __post_init__(self) -> None:
         if self.standard_deviation < 0 or self.reference_time <= 0:
@@ -336,15 +350,25 @@ class PhaseDrift:
         rng: np.random.Generator,
         context: SimulationContext,
     ) -> list[PhotonEvent]:
-        result: list[PhotonEvent] = []
-        for event in events:
-            if self.modes is not None and event.mode not in self.modes:
-                result.append(event.copy())
-                continue
-            elapsed = max(0.0, event.time - context.start_time)
+        result = [event.copy() for event in events]
+        states: dict[int, tuple[float, float]] = {}
+        selected = sorted(
+            (
+                (index, event)
+                for index, event in enumerate(events)
+                if self.modes is None or event.mode in self.modes
+            ),
+            key=lambda item: item[1].time,
+        )
+        for index, event in selected:
+            key = event.mode if self.independent_by_mode else 0
+            last_time, phase = states.get(key, (context.start_time, 0.0))
+            elapsed = max(0.0, event.time - last_time)
             sigma = self.standard_deviation * sqrt(elapsed / self.reference_time)
-            phase = rng.normal(0.0, sigma) if sigma else 0.0
-            result.append(event.copy(amplitude=event.amplitude * np.exp(1j * phase)))
+            if sigma:
+                phase += float(rng.normal(0.0, sigma))
+            states[key] = (max(last_time, event.time), phase)
+            result[index] = event.copy(amplitude=event.amplitude * np.exp(1j * phase))
         return result
 
 
@@ -402,6 +426,11 @@ class FiberLoop:
     output_mode: int = 0
     length_error: float = 0.0
     group_velocity: float = 2.04e8
+    fiber_length: float | None = None
+    attenuation_db_per_km: float = 0.0
+    insertion_loss_db: float = 0.0
+    dispersion_beta2: float = 0.0
+    pmd_coefficient: float = 0.0
 
     def __post_init__(self) -> None:
         if self.round_trip_time <= 0 or self.max_roundtrips < 1:
@@ -411,6 +440,12 @@ class FiberLoop:
             _probability("outcoupling", float(self.outcoupling))
         if self.phase_drift_std < 0 or self.group_velocity <= 0:
             raise ValidationError("invalid fiber-loop drift or group velocity")
+        if self.fiber_length is not None and self.fiber_length <= 0:
+            raise ValidationError("fiber_length must be positive when supplied")
+        if self.attenuation_db_per_km < 0 or self.insertion_loss_db < 0:
+            raise ValidationError("fiber attenuation and insertion loss cannot be negative")
+        if not np.isfinite(self.dispersion_beta2) or self.pmd_coefficient < 0:
+            raise ValidationError("invalid dispersion or PMD coefficient")
 
     def _outcoupling(self, roundtrip: int, time: float) -> float:
         if callable(self.outcoupling):
@@ -433,19 +468,46 @@ class FiberLoop:
         corrected_delay = self.round_trip_time + self.length_error / self.group_velocity
         if corrected_delay <= 0:
             raise ValidationError("length_error makes the effective round-trip time non-positive")
+        length = (
+            self.fiber_length
+            if self.fiber_length is not None
+            else self.group_velocity * self.round_trip_time
+        )
+        distributed_loss_db = self.attenuation_db_per_km * length / 1000
+        effective_transmission = self.transmission * 10 ** (
+            -(distributed_loss_db + self.insertion_loss_db) / 10
+        )
         for event in events:
             if event.mode != self.input_mode:
                 result.append(event.copy())
                 continue
             current = event.copy()
             for roundtrip in range(1, self.max_roundtrips + 1):
-                if rng.random() >= self.transmission:
+                if rng.random() >= effective_transmission:
                     break
                 drift = rng.normal(0.0, self.phase_drift_std) if self.phase_drift_std else 0.0
+                pmd_delay = (
+                    rng.normal(0.0, self.pmd_coefficient * sqrt(length))
+                    if self.pmd_coefficient
+                    else 0.0
+                )
+                packet = current.photon.wavepacket
+                if self.dispersion_beta2:
+                    packet = packet.dispersed(self.dispersion_beta2 * length)
+                photon = replace(current.photon, wavepacket=packet)
+                metadata = dict(current.metadata)
+                metadata.update(
+                    loop_effective_transmission=effective_transmission,
+                    loop_phase_drift_rad=drift,
+                    loop_pmd_delay_s=pmd_delay,
+                    loop_gdd_s2=self.dispersion_beta2 * length,
+                )
                 current = current.copy(
-                    time=current.time + corrected_delay,
+                    photon=photon,
+                    time=current.time + corrected_delay + pmd_delay,
                     amplitude=current.amplitude * np.exp(1j * (self.phase_per_roundtrip + drift)),
                     roundtrips=roundtrip,
+                    metadata=metadata,
                 )
                 if roundtrip == self.max_roundtrips or rng.random() < self._outcoupling(
                     roundtrip, current.time
