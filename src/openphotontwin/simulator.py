@@ -82,10 +82,13 @@ class DigitalTwin:
         if shots < 1:
             raise ValidationError("shots must be positive")
         rng = np.random.default_rng(seed)
+        reset = getattr(self.source, "reset", None)
+        if callable(reset):
+            reset(rng)
         context = SimulationContext(self.time_bin_width, acquisition_start)
         events: list[PhotonEvent] = []
         for shot in range(shots):
-            if isinstance(self.source, SinglePhotonSource):
+            if hasattr(self.source, "emit"):
                 events.extend(self.source.emit(shot, rng))
             else:
                 events.extend(self.source(shot, rng))
@@ -93,8 +96,15 @@ class DigitalTwin:
             events = component.process(events, rng, context)
         events.sort(key=lambda event: event.time)
         if acquisition_end is None:
-            if isinstance(self.source, SinglePhotonSource):
-                acquisition_end = shots * self.source.period
+            period = getattr(self.source, "period", None)
+            if period is not None:
+                nominal_end = shots * float(period)
+                propagated_end = (
+                    max(event.time for event in events) + self.time_bin_width
+                    if events
+                    else acquisition_start
+                )
+                acquisition_end = max(nominal_end, propagated_end)
             elif events:
                 acquisition_end = max(event.time for event in events) + self.time_bin_width
             else:
