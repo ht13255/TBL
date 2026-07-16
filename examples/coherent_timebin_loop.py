@@ -2,9 +2,9 @@
 
 import numpy as np
 
-import openphotontwin as opt
+import tbl
 
-loop = opt.CoherentTimeBinLoop(
+loop = tbl.CoherentTimeBinLoop(
     time_bins=10,
     bin_width=5e-9,
     round_trip_bins=2,
@@ -26,5 +26,5 @@ print("residual loop probability:", detailed.residual_loop_probability)
 print("physical loss probability:", detailed.physical_loss_probability)
 
 occupation = [1, 0, 1] + [0] * 7
-distribution = opt.FockSimulator(loop.circuit(seed=7)).probabilities(occupation)
+distribution = tbl.FockSimulator(loop.circuit(seed=7)).probabilities(occupation)
 print("two-photon survival:", distribution.survival_probability)
