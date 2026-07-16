@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-import openphotontwin as opt
+import tbl as opt
 
 
 def event(time=0.0, mode=0, shot=0):
@@ -18,6 +18,8 @@ def test_delay_loss_phase_and_beam_splitter_components():
     events = opt.LossChannel(1).process(events, rng, context)
     assert events[0].time == pytest.approx(2e-9)
     assert events[0].mode == 1
+    assert events[0].photon.mode == 1
+    assert events[0].photon.wavepacket.arrival_time == pytest.approx(events[0].time)
     assert abs(events[0].amplitude) == pytest.approx(1)
 
 
@@ -57,6 +59,8 @@ def test_fiber_loop_applies_db_loss_dispersion_and_records_provenance():
     assert output[0].photon.wavepacket.temporal_width > events[0].photon.wavepacket.temporal_width
     assert output[0].metadata["loop_effective_transmission"] == pytest.approx(expected_transmission)
     assert output[0].metadata["loop_gdd_s2"] == pytest.approx(-21e-24)
+    assert output[0].photon.mode == output[0].mode
+    assert output[0].photon.wavepacket.arrival_time == pytest.approx(output[0].time)
 
 
 def test_feedforward_latency_and_eom_switch():
@@ -167,6 +171,33 @@ def test_snspd_recovery_afterpulse_and_wavelength_efficiency():
     )
     assert tags[0].metadata["event_type"] == "photon"
     assert any(tag.metadata["event_type"] == "afterpulse" for tag in tags)
+
+
+def test_vectorized_snspd_fast_path_matches_generic_detection_statistics():
+    arrivals = [event(index * 10e-9, shot=index) for index in range(20_000)]
+    fast = opt.SNSPD(efficiency=0.63, jitter=0, dead_time=20e-9)
+    generic = opt.SNSPD(
+        efficiency=1,
+        wavelength_efficiency=lambda wavelength: 0.63,
+        jitter=0,
+        dead_time=20e-9,
+    )
+    fast_tags = fast.detect(
+        arrivals,
+        acquisition_start=0,
+        acquisition_end=arrivals[-1].time,
+        rng=np.random.default_rng(700),
+    )
+    generic_tags = generic.detect(
+        arrivals,
+        acquisition_start=0,
+        acquisition_end=arrivals[-1].time,
+        rng=np.random.default_rng(701),
+    )
+    assert len(fast_tags) / len(generic_tags) == pytest.approx(1.0, abs=0.025)
+    assert np.min(np.diff([tag.metadata["true_time_s"] for tag in fast_tags])) >= (
+        fast.dead_time - 1e-18
+    )
 
 
 def test_digital_twin_end_to_end_and_reproducibility():
