@@ -6,6 +6,8 @@ The package is designed to run without a GUI and can be imported directly from P
 
 > Python 3.10+ · NumPy/SciPy · MIT License
 
+Current release: **2.0.0**
+
 ## Highlights
 
 - Chirped Gaussian photons with analytic delay, detuning, polarization, purity, and dispersion
@@ -19,7 +21,7 @@ The package is designed to run without a GUI and can be imported directly from P
 - HOM-dip scans, coincidence histograms, photon-number distributions, and experiment comparison
 - CSV time tags, Poisson HOM fitting, bootstrap/Fisher uncertainty, loss intervals, and loss localization
 - Optional adapters for Perceval, Strawberry Fields, and GDSFactory/SAX-style S-parameters
-- NumPy CPU backend with optional CuPy batch propagation
+- NumPy CPU backend with optional cached, device-resident CuPy batch propagation
 
 ## Download and installation
 
@@ -41,13 +43,61 @@ python -m pip install -e ".[dev]"
 
 For a normal installation, use `python -m pip install .`. You can also download the source archive from GitHub using **Code → Download ZIP**.
 
-The core dependencies are NumPy, SciPy, pandas, and Matplotlib. Install CuPy separately when using the GPU backend, matching your CUDA version. Optional external circuit packages are only needed for their respective adapters.
+The core dependencies are NumPy, SciPy, pandas, and Matplotlib. For CUDA 12,
+install `python -m pip install ".[gpu]"`; CUDA 11 users can install
+`python -m pip install ".[gpu-cuda11]"`. These extras include CuPy and its
+user-space CUDA runtime libraries; a compatible NVIDIA driver is still
+required. Optional external circuit packages are only needed for their
+respective adapters.
+
+## Migrating to TBL 2.x
+
+The canonical package is now `tbl`:
+
+```python
+import tbl
+```
+
+Existing `import openphotontwin` applications still work through a thin
+compatibility shim and emit a `DeprecationWarning`. New code, documentation,
+type annotations, and package metadata should use `tbl`. The compatibility
+alias `OpenPhotonTwinError` remains available, while `TBLError` is the
+canonical base exception.
+
+## Repeated CPU/GPU propagation
+
+`BatchPropagator` keeps a transfer matrix on the selected device across calls.
+With `backend="auto"`, small products remain on CPU while larger products use a
+GPU only after a real CuPy matrix-operation probe succeeds. The crossover is
+adjusted for dtype and whether the result remains on-device; double precision
+stays on CPU much longer on consumer GPUs. An installed but broken CUDA runtime
+therefore falls back safely to NumPy.
+
+```python
+import numpy as np
+import tbl
+
+matrix = np.eye(128, dtype=np.complex64)
+propagator = tbl.BatchPropagator(matrix, backend="auto")
+
+host_result = propagator(np.ones((2048, 128), dtype=np.complex64))
+
+# In a GPU-only pipeline, create a GPU propagator and retain its output there.
+gpu = tbl.get_backend("cupy").module
+gpu_propagator = tbl.BatchPropagator(matrix, backend="cupy")
+device_result = gpu_propagator(gpu.ones((2048, 128), dtype=gpu.complex64), return_device=True)
+gpu_propagator.synchronize()
+```
+
+Use `return_device=True` between GPU stages to avoid an unnecessary device-to-host
+copy. Explicit `backend="cupy"` requests raise `OptionalDependencyError` with the
+runtime failure; `backend="auto"` falls back to CPU.
 
 ## Quick start
 
 ```python
 import numpy as np
-import openphotontwin as tbl
+import tbl
 
 photon_a = tbl.Wavepacket(temporal_width=20e-12, wavelength=1550e-9)
 photon_b = tbl.Wavepacket(temporal_width=20e-12, wavelength=1550e-9)
@@ -65,10 +115,19 @@ print(f"HOM visibility: {result.visibility:.3f}")
 result.as_dataframe().to_csv("hom.csv", index=False)
 ```
 
+For scripts running on servers or CI without a display, configure Matplotlib
+before importing `matplotlib.pyplot`:
+
+```python
+import tbl
+
+tbl.configure_matplotlib("Agg")
+```
+
 ## Exact Fock simulation
 
 ```python
-import openphotontwin as tbl
+import tbl
 
 circuit = tbl.LinearOpticalCircuit(2).beam_splitter(
     0, 1, reflectivity=0.5
@@ -125,7 +184,7 @@ Monte Carlo when coherent recombination is not required.
 ## Fiber-loop digital twin
 
 ```python
-import openphotontwin as tbl
+import tbl
 
 source = tbl.CorrelatedPhotonSource(
     repetition_rate=10e6,
@@ -161,7 +220,7 @@ run.save_time_tags("time_tags.csv")
 TBL accepts CSV time tags with at least `time` and `channel` columns. The optional `shot` column can preserve acquisition grouping.
 
 ```python
-import openphotontwin as tbl
+import tbl
 
 tags = tbl.load_time_tags("time_tags.csv")
 histogram = tbl.coincidence_histogram(
@@ -204,7 +263,7 @@ python -m pytest
 python -m ruff check .
 ```
 
-Runnable examples are available in [`examples/`](examples). The implementation is in [`src/openphotontwin/`](src/openphotontwin/), with tests in [`tests/`](tests).
+Runnable examples are available in [`examples/`](examples). The canonical implementation is in [`src/tbl/`](src/tbl/), with tests in [`tests/`](tests).
 Release changes are listed in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
