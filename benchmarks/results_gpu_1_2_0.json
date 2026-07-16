@@ -1,0 +1,69 @@
+{
+  "version": "1.2.0",
+  "gpu": "NVIDIA GeForce GTX 1060 3GB",
+  "compute_capability": "6.1",
+  "cupy": "14.1.1",
+  "cuda_runtime": "12.9",
+  "selected_cases": [
+    {
+      "dtype": "complex64",
+      "width": 64,
+      "batch": 256,
+      "multiply_count": 1048576,
+      "cpu_s": 0.00009032,
+      "gpu_roundtrip_s": 0.00029681,
+      "gpu_upload_only_s": 0.00017837,
+      "gpu_resident_s": 0.00005686
+    },
+    {
+      "dtype": "complex64",
+      "width": 128,
+      "batch": 1024,
+      "multiply_count": 16777216,
+      "cpu_s": 0.00197346,
+      "gpu_roundtrip_s": 0.00125396,
+      "gpu_upload_only_s": 0.00042688,
+      "gpu_resident_s": 0.00013334
+    },
+    {
+      "dtype": "complex64",
+      "width": 128,
+      "batch": 2048,
+      "multiply_count": 33554432,
+      "cpu_s": 0.00304186,
+      "gpu_roundtrip_s": 0.00204644,
+      "gpu_upload_only_s": 0.00080256,
+      "gpu_resident_s": 0.00016156
+    },
+    {
+      "dtype": "complex64",
+      "width": 256,
+      "batch": 1024,
+      "multiply_count": 67108864,
+      "cpu_s": 0.00534870,
+      "gpu_roundtrip_s": 0.00201440,
+      "gpu_upload_only_s": 0.00109113,
+      "gpu_resident_s": 0.00029173
+    },
+    {
+      "dtype": "complex128",
+      "width": 128,
+      "batch": 2048,
+      "multiply_count": 33554432,
+      "cpu_s": 0.00488182,
+      "gpu_roundtrip_s": 0.00607096,
+      "gpu_upload_only_s": 0.00353148,
+      "gpu_resident_s": 0.00266112
+    },
+    {
+      "dtype": "complex128",
+      "width": 256,
+      "batch": 4096,
+      "multiply_count": 268435456,
+      "cpu_s": 0.02923227,
+      "gpu_roundtrip_s": 0.02881040,
+      "gpu_upload_only_s": 0.02173920,
+      "gpu_resident_s": 0.01797763
+    }
+  ]
+}
