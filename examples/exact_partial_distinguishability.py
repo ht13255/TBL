@@ -2,7 +2,7 @@
 
 import numpy as np
 
-import openphotontwin as opt
+import tbl
 
 rng = np.random.default_rng(5)
 raw = rng.normal(size=(3, 3)) + 1j * rng.normal(size=(3, 3))
@@ -14,7 +14,7 @@ internal_states = np.array(
 )
 overlap_matrix = internal_states.conj() @ internal_states.T
 
-circuit = opt.LinearOpticalCircuit.from_transfer_matrix(unitary)
-distribution = opt.FockSimulator(circuit).probabilities([1, 1, 1], overlap_matrix=overlap_matrix)
+circuit = tbl.LinearOpticalCircuit.from_transfer_matrix(unitary)
+distribution = tbl.FockSimulator(circuit).probabilities([1, 1, 1], overlap_matrix=overlap_matrix)
 for occupation, probability in sorted(distribution.probabilities.items()):
     print(occupation, f"{probability:.8f}")
