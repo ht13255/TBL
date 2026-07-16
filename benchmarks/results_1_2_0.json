@@ -1,0 +1,24 @@
+{
+  "version": "1.2.0",
+  "environment": {
+    "os": "Windows",
+    "numpy": "2.5.1",
+    "blas": "OpenBLAS Haswell, max 24 threads",
+    "gpu": "NVIDIA GeForce GTX 1060 3GB",
+    "gpu_execution": "CuPy 14.1.1 with pip CUDA runtime 12.9"
+  },
+  "median_seconds": {
+    "permanent_n9_x20": 0.0010050666654327263,
+    "fock_5ph_7mode": 0.0012402799970004708,
+    "partial_4ph_5mode": 0.0033329333333919444,
+    "coherent_loop_256": 0.004288866669715692,
+    "digital_twin_50k": 0.3067160999926273
+  },
+  "paired_cpu_batch": {
+    "legacy_median_seconds": 0.00523339000355918,
+    "optimized_median_seconds": 0.005120650003664196,
+    "optimized_over_legacy": 0.9784575581375914
+  },
+  "gpu_upload_only_2048x128_complex128_seconds": 0.0040944000007584695,
+  "gpu_available": true
+}
