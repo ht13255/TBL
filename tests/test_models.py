@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-import openphotontwin as opt
+import tbl as opt
 
 
 def test_wavepacket_normalization_and_identical_overlap():
@@ -20,6 +20,19 @@ def test_wavepacket_overlap_resolves_delay_frequency_and_polarization():
     assert 0 < first.indistinguishability(delayed) < 1
     assert 0 < first.indistinguishability(detuned) < 1
     assert first.indistinguishability(orthogonal) == pytest.approx(0.0)
+
+
+def test_wavepacket_overlap_is_stable_under_large_timestamp_translation():
+    width = 20e-12
+    delay = 17e-12
+    reference = opt.Wavepacket(temporal_width=width).mode_overlap(
+        opt.Wavepacket(arrival_time=delay, temporal_width=width)
+    )
+    offset = 1.0
+    translated = opt.Wavepacket(arrival_time=offset, temporal_width=width).mode_overlap(
+        opt.Wavepacket(arrival_time=offset + delay, temporal_width=width)
+    )
+    assert abs(translated) == pytest.approx(abs(reference), rel=2e-6)
 
 
 def test_chirped_overlap_and_dispersion_obey_gaussian_invariants():
@@ -47,6 +60,20 @@ def test_invalid_physical_parameters_raise_domain_error():
         opt.SinglePhotonSource(p_single=0.8, p_double=0.3)
     with pytest.raises(opt.ValidationError):
         opt.TimeBinQubit(alpha=0, beta=0)
+    with pytest.raises(opt.ValidationError):
+        opt.Wavepacket(arrival_time=np.nan)
+    with pytest.raises(opt.ValidationError):
+        opt.Wavepacket(wavelength=np.inf)
+    with pytest.raises(opt.ValidationError):
+        opt.TimeBinQubit(alpha=np.nan, beta=1)
+
+
+def test_photon_event_rejects_inconsistent_time_and_mode():
+    photon = opt.Photon(opt.Wavepacket(arrival_time=1e-9), mode=2)
+    with pytest.raises(opt.ValidationError):
+        opt.PhotonEvent(photon, 2e-9, 2)
+    with pytest.raises(opt.ValidationError):
+        opt.PhotonEvent(photon, 1e-9, 1)
 
 
 def test_source_and_time_bin_sampling_are_reproducible():
@@ -76,6 +103,16 @@ def test_correlated_source_reproduces_mean_and_g2_statistics():
     assert measured_g2 == pytest.approx(0.08, abs=0.01)
 
 
+def test_correlated_source_applies_initial_blink_state_without_manual_reset():
+    source = opt.CorrelatedPhotonSource(
+        mean_photon_number=1.0,
+        g2_zero=0.0,
+        initial_on_probability=0.0,
+        blink_off_to_on=0.0,
+    )
+    assert source.emit(0, np.random.default_rng(17)) == []
+
+
 def test_spectral_diffusion_has_requested_ou_correlation():
     source = opt.CorrelatedPhotonSource(
         repetition_rate=1e6,
@@ -99,3 +136,7 @@ def test_time_bin_coherent_events_are_normalized():
     events = qubit.events()
     assert sum(abs(event.amplitude) ** 2 for event in events) == pytest.approx(1.0)
     assert events[1].time - events[0].time == pytest.approx(1e-9)
+    assert [event.photon.time_bin for event in events] == [0, 1]
+    assert all(
+        event.photon.wavepacket.arrival_time == pytest.approx(event.time) for event in events
+    )
