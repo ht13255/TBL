@@ -1,7 +1,19 @@
 import numpy as np
 import pytest
 
-import openphotontwin as opt
+import tbl as opt
+
+
+def _slow_loop_transfer(loop, seed):
+    reflectivities = loop._reflectivity_trace()
+    phases = loop.phase_trace(seed=seed)
+    columns = []
+    for column in range(loop.time_bins):
+        state = np.zeros(loop.time_bins, dtype=complex)
+        state[column] = 1
+        output, _ = loop._propagate_with_traces(state, reflectivities, phases)
+        columns.append(output)
+    return np.column_stack(columns)
 
 
 def test_open_coupler_is_identity_and_closed_coupler_is_delay():
@@ -70,3 +82,21 @@ def test_dynamic_coupler_schedule_and_switching_time():
     matrix = loop.transfer_matrix()
     assert matrix[0, 0] == pytest.approx(1)
     assert abs(matrix[2, 2]) == pytest.approx(1)
+
+
+def test_vectorized_loop_transfer_matches_basis_by_basis_recurrence():
+    loop = opt.CoherentTimeBinLoop(
+        17,
+        0.8e-9,
+        round_trip_bins=3,
+        reflectivity={0: 0.1, 4: 0.7, 11: 0.35},
+        switching_time=1.6e-9,
+        round_trip_transmission=0.91,
+        coupler_transmission=0.96,
+        phase=lambda index, time: 0.07 * index + 1e7 * time,
+        phase_noise_std=0.02,
+        phase_correlation_time=4e-9,
+    )
+    assert loop.transfer_matrix(seed=91) == pytest.approx(
+        _slow_loop_transfer(loop, seed=91), abs=2e-13
+    )
