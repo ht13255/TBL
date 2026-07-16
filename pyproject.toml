@@ -3,18 +3,17 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openphotontwin"
-version = "1.1.0"
-description = "Time-resolved digital twin for time-bin and fiber-loop quantum photonics"
+name = "tbl"
+version = "2.0.0"
+description = "TBL: time-bin and fiber-loop quantum photonics digital twin"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
-authors = [{name = "OpenPhotonTwin contributors"}]
+license = "MIT"
+authors = [{name = "TBL contributors"}]
 keywords = ["quantum-photonics", "time-bin", "fiber-loop", "HOM", "SNSPD", "simulation"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Topic :: Scientific/Engineering :: Physics",
 ]
@@ -26,7 +25,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gpu = ["cupy>=13"]
+gpu = ["cupy-cuda12x[ctk]>=13"]
+gpu-cuda11 = ["cupy-cuda11x[ctk]>=13"]
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.5"]
 
 [project.urls]
