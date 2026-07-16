@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import openphotontwin as opt
+import tbl as opt
 
 
 def test_hom_scan_visibility_and_sampled_counts():
@@ -13,6 +13,18 @@ def test_hom_scan_visibility_and_sampled_counts():
     assert scan.visibility == pytest.approx(1.0, abs=1e-6)
     assert scan.coincidence_counts.shape == (101,)
     assert scan.coincidence_probability[50] == pytest.approx(0.0)
+
+
+def test_hom_visibility_is_intrinsic_under_efficiency_and_background():
+    packet = opt.Wavepacket(temporal_width=20e-12, purity=0.64)
+    scan = opt.hom_scan(
+        np.linspace(-200e-12, 200e-12, 101),
+        packet,
+        packet,
+        detector_efficiency=0.61,
+        background_probability=0.2,
+    )
+    assert scan.visibility == pytest.approx(0.64, abs=1e-12)
 
 
 def test_hom_fit_recovers_synthetic_parameters():
@@ -95,4 +107,18 @@ def test_time_tag_csv_and_coincidence_histogram(tmp_path):
     tags = opt.load_time_tags(path, time_column="t_ps", channel_column="det", time_scale=1e-12)
     histogram = opt.coincidence_histogram(tags, 0, 1, bin_width=5e-12, max_delay=20e-12)
     assert histogram.counts.sum() == 2
+    assert 0.0 in histogram.bin_centers
     assert tags["time"].max() == pytest.approx(111e-12)
+
+
+def test_coincidence_histogram_centers_zero_delay_and_preserves_bin_width():
+    tags = pd.DataFrame(
+        {"time": [0.0, 0.0, 9e-12], "channel": [0, 1, 1], "shot": [0, 0, 0]}
+    )
+    histogram = opt.coincidence_histogram(
+        tags, 0, 1, bin_width=4e-12, max_delay=10e-12
+    )
+    zero = int(np.flatnonzero(histogram.bin_centers == 0.0)[0])
+    assert histogram.counts[zero] == 1
+    assert np.diff(histogram.bin_centers) == pytest.approx(4e-12)
+    assert histogram.bin_width == pytest.approx(4e-12)
