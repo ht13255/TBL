@@ -2,14 +2,14 @@
 
 import numpy as np
 
-import openphotontwin as opt
+import tbl
 
-source = opt.CorrelatedPhotonSource(
+source = tbl.CorrelatedPhotonSource(
     repetition_rate=10e6,
     mean_photon_number=0.65,
     g2_zero=0.015,
     collection_efficiency=0.72,
-    wavepacket=opt.Wavepacket(
+    wavepacket=tbl.Wavepacket(
         temporal_width=22e-12,
         wavelength=1550e-9,
         purity=0.94,
@@ -24,7 +24,7 @@ source = opt.CorrelatedPhotonSource(
 
 loop_length = 20.0
 group_velocity = 2.04e8
-loop = opt.FiberLoop(
+loop = tbl.FiberLoop(
     round_trip_time=loop_length / group_velocity,
     transmission=0.97,
     outcoupling={1: 0.0, 2: 0.15, 3: 0.45, 4: 1.0},
@@ -38,7 +38,7 @@ loop = opt.FiberLoop(
     pmd_coefficient=0.1e-12 / np.sqrt(1000),
 )
 
-detector = opt.SNSPD(
+detector = tbl.SNSPD(
     efficiency=0.82,
     dark_count_rate=20,
     jitter=18e-12,
@@ -51,7 +51,7 @@ detector = opt.SNSPD(
     time_tagger_resolution=1e-12,
 )
 
-twin = opt.DigitalTwin(source, [loop], opt.DetectorArray({0: detector}))
+twin = tbl.DigitalTwin(source, [loop], tbl.DetectorArray({0: detector}))
 result = twin.run(10_000, seed=20260716)
 print(result.photon_number_distribution)
 print(result.tags_dataframe()["event_type"].value_counts())
