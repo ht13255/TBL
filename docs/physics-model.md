@@ -1,6 +1,6 @@
-# OpenPhotonTwin physics model and validity regime
+# TBL physics model and validity regime
 
-OpenPhotonTwin uses SI units throughout: seconds, metres, radians per second,
+TBL uses SI units throughout: seconds, metres, radians per second,
 counts per second, and dimensionless probabilities. The package contains two
 different simulation layers. They should not be confused.
 
