@@ -2,14 +2,14 @@
 
 import numpy as np
 
-import openphotontwin as opt
+import tbl
 
 rng = np.random.default_rng(4)
 delays = np.linspace(-100e-12, 100e-12, 81)
 ideal = 1500 * (1 - 0.94 * np.exp(-((delays - 4e-12) ** 2) / (2 * (28e-12) ** 2))) + 12
 measured = rng.poisson(ideal)
 
-result = opt.auto_calibrate(
+result = tbl.auto_calibrate(
     delays=delays,
     coincidences=measured,
     ideal_coincidences=ideal,
@@ -18,4 +18,4 @@ result = opt.auto_calibrate(
     detector_efficiency=0.8,
     passes=5,
 )
-print(opt.calibration_report(result))
+print(tbl.calibration_report(result))
