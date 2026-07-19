@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from math import pi, sqrt
 from typing import Any
 
 import numpy as np
+from scipy.special import erfcx
 
-from .errors import ValidationError
+from .errors import SimulationError, ValidationError
 
 _C = 299_792_458.0
 _SETATTR = object.__setattr__
@@ -26,11 +28,13 @@ def _probability(name: str, value: float) -> float:
 
 @dataclass(frozen=True, slots=True)
 class Wavepacket:
-    """Gaussian single-photon wavepacket with optional quadratic chirp.
+    """Normalized Gaussian or one-sided exponential single-photon wavepacket.
 
-    Times are seconds, wavelength is metres, and ``temporal_width`` is the
-    standard deviation of the complex field envelope. Polarization is a Jones
-    vector in the H/V basis and is normalized on construction. ``chirp`` is
+    Times are seconds and wavelength is metres. For ``profile="gaussian"``,
+    ``temporal_width`` is the intensity standard deviation. For
+    ``profile="exponential"``, it is the radiative intensity lifetime and the
+    field is causal from ``arrival_time``. Polarization is a Jones vector in
+    the H/V basis and is normalized on construction. Gaussian ``chirp`` is
     dimensionless in the convention
     ``exp(-(1-i*chirp)*(t-t0)**2/(4*temporal_width**2))``.
 
@@ -46,6 +50,7 @@ class Wavepacket:
     purity: float = 1.0
     chirp: float = 0.0
     label: str | None = None
+    profile: str = "gaussian"
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.arrival_time):
@@ -57,11 +62,38 @@ class Wavepacket:
         _probability("purity", self.purity)
         if not np.isfinite(self.chirp):
             raise ValidationError("chirp must be finite")
+        if self.profile not in {"gaussian", "exponential"}:
+            raise ValidationError("profile must be 'gaussian' or 'exponential'")
+        if self.profile == "exponential" and self.chirp != 0:
+            raise ValidationError("exponential wavepackets do not support quadratic chirp")
         p = np.asarray(self.polarization, dtype=complex)
         if p.shape != (2,) or not np.all(np.isfinite(p)) or np.linalg.norm(p) == 0:
             raise ValidationError("polarization must be a non-zero two-element Jones vector")
         p = p / np.linalg.norm(p)
         _SETATTR(self, "polarization", (complex(p[0]), complex(p[1])))
+
+    @classmethod
+    def exponential(
+        cls,
+        lifetime: float,
+        *,
+        arrival_time: float = 0.0,
+        wavelength: float = 1550e-9,
+        polarization: tuple[complex, complex] = (1.0 + 0j, 0.0 + 0j),
+        purity: float = 1.0,
+        label: str | None = None,
+    ) -> Wavepacket:
+        """Construct a causal spontaneous-emission wavepacket."""
+
+        return cls(
+            arrival_time=arrival_time,
+            temporal_width=lifetime,
+            wavelength=wavelength,
+            polarization=polarization,
+            purity=purity,
+            label=label,
+            profile="exponential",
+        )
 
     @property
     def angular_frequency(self) -> float:
@@ -76,6 +108,7 @@ class Wavepacket:
         arrival_time: float | None = None,
         temporal_width: float | None = None,
         wavelength: float | None = None,
+        purity: float | None = None,
         chirp: float | None = None,
     ) -> Wavepacket:
         """Fast immutable copy after callers have established physical validity."""
@@ -97,15 +130,18 @@ class Wavepacket:
             self.wavelength if wavelength is None else float(wavelength),
         )
         _SETATTR(packet, "polarization", self.polarization)
-        _SETATTR(packet, "purity", self.purity)
+        _SETATTR(packet, "purity", self.purity if purity is None else float(purity))
         _SETATTR(packet, "chirp", self.chirp if chirp is None else float(chirp))
         _SETATTR(packet, "label", self.label)
+        _SETATTR(packet, "profile", self.profile)
         return packet
 
     @property
     def spectral_width_angular(self) -> float:
         """Intensity standard deviation in angular frequency (rad/s)."""
 
+        if self.profile == "exponential":
+            return float("inf")
         return sqrt(1 + self.chirp**2) / (2 * self.temporal_width)
 
     def mode_overlap(self, other: Wavepacket) -> complex:
@@ -115,6 +151,44 @@ class Wavepacket:
         widths, arrival times, carrier frequencies, Jones vectors, and chirp.
         Purity is excluded and applied by :meth:`overlap`.
         """
+
+        if self.profile == "exponential" and other.profile == "exponential":
+            lower = max(self.arrival_time, other.arrival_time)
+            offset_self = lower - self.arrival_time
+            offset_other = lower - other.arrival_time
+            decay = 1 / (2 * self.temporal_width) + 1 / (2 * other.temporal_width)
+            detuning = self.angular_frequency - other.angular_frequency
+            temporal = (
+                np.exp(
+                    -offset_self / (2 * self.temporal_width)
+                    - offset_other / (2 * other.temporal_width)
+                    + 1j * self.angular_frequency * offset_self
+                    - 1j * other.angular_frequency * offset_other
+                )
+                / sqrt(self.temporal_width * other.temporal_width)
+                / (decay - 1j * detuning)
+            )
+            polarization = np.vdot(np.asarray(self.polarization), np.asarray(other.polarization))
+            return complex(temporal * polarization)
+        if self.profile == "exponential":
+            return complex(np.conj(other.mode_overlap(self)))
+        if other.profile == "exponential":
+            sigma = self.temporal_width
+            lifetime = other.temporal_width
+            delay = other.arrival_time - self.arrival_time
+            a = (1 + 1j * self.chirp) / (4 * sigma**2)
+            b = -1 / (2 * lifetime) + 1j * (self.angular_frequency - other.angular_frequency)
+            root_a = np.sqrt(a)
+            argument = root_a * delay - b / (2 * root_a)
+            integral = (
+                np.sqrt(pi)
+                / (2 * root_a)
+                * np.exp(1j * self.angular_frequency * delay - a * delay**2)
+                * erfcx(argument)
+            )
+            normalization = (2 * pi * sigma**2) ** (-0.25) / sqrt(lifetime)
+            polarization = np.vdot(np.asarray(self.polarization), np.asarray(other.polarization))
+            return complex(normalization * integral * polarization)
 
         s1, s2 = self.temporal_width, other.temporal_width
         delay = other.arrival_time - self.arrival_time
@@ -148,11 +222,89 @@ class Wavepacket:
     def indistinguishability(self, other: Wavepacket) -> float:
         return float(np.clip(abs(self.overlap(other)) ** 2, 0.0, 1.0))
 
+    def indistinguishability_scan(
+        self, other: Wavepacket, delays: Sequence[float] | np.ndarray
+    ) -> np.ndarray:
+        """Vectorized indistinguishability against delayed copies of ``other``.
+
+        This evaluates the same closed-form integrals as :meth:`mode_overlap`
+        without constructing one immutable wavepacket per scan point.
+        """
+
+        delay_values = np.asarray(delays, dtype=float)
+        if delay_values.ndim != 1 or not np.all(np.isfinite(delay_values)):
+            raise ValidationError("delays must be a finite one-dimensional sequence")
+        polarization = (
+            abs(np.vdot(np.asarray(self.polarization), np.asarray(other.polarization))) ** 2
+        )
+        purity = sqrt(self.purity * other.purity)
+
+        if self.profile == "exponential" and other.profile == "exponential":
+            relative_delay = other.arrival_time + delay_values - self.arrival_time
+            self_offset = np.maximum(relative_delay, 0.0)
+            other_offset = np.maximum(-relative_delay, 0.0)
+            decay = 1 / (2 * self.temporal_width) + 1 / (2 * other.temporal_width)
+            detuning = self.angular_frequency - other.angular_frequency
+            temporal_squared = np.exp(
+                -self_offset / self.temporal_width - other_offset / other.temporal_width
+            ) / (self.temporal_width * other.temporal_width * (decay**2 + detuning**2))
+            return np.clip(temporal_squared * polarization * purity, 0.0, 1.0)
+
+        if self.profile == "gaussian" and other.profile == "gaussian":
+            s1, s2 = self.temporal_width, other.temporal_width
+            relative_delay = other.arrival_time + delay_values - self.arrival_time
+            a1 = (1 - 1j * self.chirp) / (4 * s1**2)
+            a2 = (1 - 1j * other.chirp) / (4 * s2**2)
+            quadratic = np.conj(a1) + a2
+            linear = 2 * a2 * relative_delay + 1j * (
+                self.angular_frequency - other.angular_frequency
+            )
+            constant = -a2 * relative_delay**2 + 1j * other.angular_frequency * relative_delay
+            normalization = (2 * pi * s1**2) ** (-0.25) * (2 * pi * s2**2) ** (-0.25)
+            temporal = (
+                normalization
+                * np.sqrt(pi / quadratic)
+                * np.exp(linear**2 / (4 * quadratic) + constant)
+            )
+            return np.clip(abs(temporal) ** 2 * polarization * purity, 0.0, 1.0)
+
+        gaussian = self if self.profile == "gaussian" else other
+        exponential = other if other.profile == "exponential" else self
+        if self.profile == "gaussian":
+            relative_delay = exponential.arrival_time + delay_values - gaussian.arrival_time
+        else:
+            relative_delay = exponential.arrival_time - gaussian.arrival_time - delay_values
+        sigma = gaussian.temporal_width
+        lifetime = exponential.temporal_width
+        a = (1 + 1j * gaussian.chirp) / (4 * sigma**2)
+        b = -1 / (2 * lifetime) + 1j * (gaussian.angular_frequency - exponential.angular_frequency)
+        root_a = np.sqrt(a)
+        argument = root_a * relative_delay - b / (2 * root_a)
+        integral = (
+            np.sqrt(pi)
+            / (2 * root_a)
+            * np.exp(1j * gaussian.angular_frequency * relative_delay - a * relative_delay**2)
+            * erfcx(argument)
+        )
+        normalization = (2 * pi * sigma**2) ** (-0.25) / sqrt(lifetime)
+        return np.clip(
+            abs(normalization * integral) ** 2 * polarization * purity,
+            0.0,
+            1.0,
+        )
+
     def amplitude(self, time: np.ndarray | float) -> np.ndarray:
         """Evaluate the normalized temporal field amplitude."""
 
         t = np.asarray(time, dtype=float)
         relative = t - self.arrival_time
+        if self.profile == "exponential":
+            envelope = np.where(
+                relative >= 0,
+                np.exp(-relative / (2 * self.temporal_width)) / sqrt(self.temporal_width),
+                0.0,
+            )
+            return envelope * np.exp(-1j * self.angular_frequency * relative)
         norm = (2 * pi * self.temporal_width**2) ** (-0.25)
         envelope = np.exp(-(1 - 1j * self.chirp) * relative**2 / (4 * self.temporal_width**2))
         return norm * envelope * np.exp(-1j * self.angular_frequency * relative)
@@ -166,6 +318,13 @@ class Wavepacket:
 
         if not np.isfinite(group_delay_dispersion):
             raise ValidationError("group_delay_dispersion must be finite")
+        if self.profile == "exponential":
+            if group_delay_dispersion == 0:
+                return self
+            raise SimulationError(
+                "second-order dispersion leaves the exponential profile family; "
+                "use a measured spectral transfer model"
+            )
         spectral_quadratic = self.temporal_width**2 / (1 - 1j * self.chirp)
         spectral_quadratic -= 0.5j * group_delay_dispersion
         temporal_quadratic = 1 / (4 * spectral_quadratic)
@@ -197,9 +356,7 @@ def _copy_photon(
     mode: int | None = None,
 ) -> Photon:
     copied = object.__new__(Photon)
-    _SETATTR(
-        copied, "wavepacket", photon.wavepacket if wavepacket is None else wavepacket
-    )
+    _SETATTR(copied, "wavepacket", photon.wavepacket if wavepacket is None else wavepacket)
     _SETATTR(copied, "mode", photon.mode if mode is None else mode)
     _SETATTR(copied, "time_bin", photon.time_bin)
     _SETATTR(copied, "metadata", photon.metadata)
@@ -278,7 +435,12 @@ class PhotonEvent:
 
 
 def _source_photon_event(
-    packet: Wavepacket, mode: int, shot: int, source_index: int
+    packet: Wavepacket,
+    mode: int,
+    shot: int,
+    source_index: int,
+    *,
+    metadata: dict[str, Any] | None = None,
 ) -> PhotonEvent:
     """Construct a validated source event without repeated dataclass dispatch."""
 
@@ -286,7 +448,8 @@ def _source_photon_event(
     _SETATTR(photon, "wavepacket", packet)
     _SETATTR(photon, "mode", mode)
     _SETATTR(photon, "time_bin", 0)
-    _SETATTR(photon, "metadata", {"source_index": source_index})
+    photon_metadata = {"source_index": source_index} if metadata is None else metadata
+    _SETATTR(photon, "metadata", photon_metadata)
     event = object.__new__(PhotonEvent)
     event.photon = photon
     event.time = packet.arrival_time
@@ -294,7 +457,7 @@ def _source_photon_event(
     event.amplitude = 1.0 + 0j
     event.shot = shot
     event.roundtrips = 0
-    event.metadata = {}
+    event.metadata = {} if metadata is None else dict(metadata)
     return event
 
 
@@ -327,9 +490,7 @@ class TimeBinQubit:
         late_photon = Photon(late_packet, mode=mode, time_bin=1)
         return [
             PhotonEvent(early_photon, self.wavepacket.arrival_time, mode, self.alpha, shot, 0),
-            PhotonEvent(
-                late_photon, late_packet.arrival_time, mode, self.beta, shot, 0
-            ),
+            PhotonEvent(late_photon, late_packet.arrival_time, mode, self.beta, shot, 0),
         ]
 
     def sample_event(
@@ -413,14 +574,10 @@ class SinglePhotonSource:
         double_pulses = counts == 2
         if np.any(double_pulses):
             source_indices[np.cumsum(counts)[double_pulses] - 1] = 1
-        for shot, source_index, jitter in zip(
-            shot_indices, source_indices, jitters, strict=True
-        ):
+        for shot, source_index, jitter in zip(shot_indices, source_indices, jitters, strict=True):
             arrival = int(shot) * self.period + float(jitter)
             packet = self.wavepacket._copy_with(arrival_time=arrival)
-            events.append(
-                _source_photon_event(packet, mode, int(shot), int(source_index))
-            )
+            events.append(_source_photon_event(packet, mode, int(shot), int(source_index)))
         return events
 
 
