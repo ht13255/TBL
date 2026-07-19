@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -111,6 +112,33 @@ class LossEstimate:
 
 
 @dataclass(frozen=True, slots=True)
+class BinomialEstimate:
+    """A binomial probability with an exact Clopper-Pearson interval."""
+
+    successes: int
+    trials: int
+    probability: float
+    standard_error: float
+    confidence_level: float
+    interval: tuple[float, float]
+
+
+@dataclass(frozen=True, slots=True)
+class CorrelatedBernoulliEstimate:
+    """Click probability with autocorrelation-aware Monte Carlo uncertainty."""
+
+    probability: float
+    shots: int
+    integrated_autocorrelation_time: float
+    effective_sample_size: float
+    standard_error: float
+    confidence_level: float
+    interval: tuple[float, float]
+    max_lag: int
+    batch_estimates: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
 class LossProfile:
     """Loss estimates between ordered experimental checkpoints."""
 
@@ -212,9 +240,7 @@ def coincidence_histogram(
         if high > low:
             local, _ = np.histogram(second[low:high] - timestamp, bins=edges)
             counts += local
-    return CoincidenceHistogram(
-        centers, counts, bin_width, (channel_a, channel_b)
-    )
+    return CoincidenceHistogram(centers, counts, bin_width, (channel_a, channel_b))
 
 
 def _hom_model(
@@ -419,14 +445,8 @@ def estimate_loss(
     integer_counts = float(input_count).is_integer() and float(output_count).is_integer()
     if integer_counts and output_count <= input_count:
         trials, successes = int(input_count), int(output_count)
-        alpha = 1 - confidence_level
-        observed_lower = (
-            0.0 if successes == 0 else float(beta.ppf(alpha / 2, successes, trials - successes + 1))
-        )
-        observed_upper = (
-            1.0
-            if successes == trials
-            else float(beta.ppf(1 - alpha / 2, successes + 1, trials - successes))
+        observed_lower, observed_upper = _clopper_pearson_interval(
+            successes, trials, confidence_level
         )
         transmission_interval = (
             float(np.clip(observed_lower / detector_efficiency, 0.0, 1.0)),
@@ -444,6 +464,138 @@ def estimate_loss(
         confidence_level,
         transmission_interval,
         per_pass_interval,
+    )
+
+
+def _clopper_pearson_interval(
+    successes: int, trials: int, confidence_level: float
+) -> tuple[float, float]:
+    alpha = 1 - confidence_level
+    lower = 0.0 if successes == 0 else float(beta.ppf(alpha / 2, successes, trials - successes + 1))
+    upper = (
+        1.0
+        if successes == trials
+        else float(beta.ppf(1 - alpha / 2, successes + 1, trials - successes))
+    )
+    return lower, upper
+
+
+def estimate_binomial(
+    successes: int,
+    trials: int,
+    *,
+    confidence_level: float = 0.95,
+) -> BinomialEstimate:
+    """Estimate a Bernoulli probability with an exact finite-sample interval."""
+
+    if (
+        isinstance(successes, bool)
+        or isinstance(trials, bool)
+        or not isinstance(successes, (int, np.integer))
+        or not isinstance(trials, (int, np.integer))
+        or trials < 1
+        or not 0 <= successes <= trials
+    ):
+        raise ValidationError("successes and trials must be physical integer counts")
+    if not np.isfinite(confidence_level) or not 0 < confidence_level < 1:
+        raise ValidationError("confidence_level must be finite and in (0, 1)")
+    probability = successes / trials
+    standard_error = float(np.sqrt(probability * (1 - probability) / trials))
+    interval = _clopper_pearson_interval(successes, trials, confidence_level)
+    return BinomialEstimate(
+        int(successes),
+        int(trials),
+        float(probability),
+        standard_error,
+        float(confidence_level),
+        interval,
+    )
+
+
+def estimate_correlated_bernoulli(
+    outcomes: Sequence[bool] | np.ndarray,
+    *,
+    confidence_level: float = 0.95,
+    max_lag: int | None = None,
+    batches: int = 20,
+) -> CorrelatedBernoulliEstimate:
+    """Estimate Bernoulli uncertainty using integrated autocorrelation time.
+
+    The FFT autocovariance is truncated with Geyer's initial-positive-sequence
+    rule. A Wilson interval uses the resulting effective sample size, avoiding
+    the iid assumption of an exact Clopper-Pearson interval.
+    """
+
+    values = np.asarray(outcomes)
+    if values.ndim != 1 or values.size < 2:
+        raise ValidationError("correlated Bernoulli estimation needs at least two outcomes")
+    if values.dtype.kind not in "biuf" or not np.all(np.isfinite(values)):
+        raise ValidationError("outcomes must be finite binary values")
+    if not np.all((values == 0) | (values == 1)):
+        raise ValidationError("outcomes must contain only zero and one")
+    if not np.isfinite(confidence_level) or not 0 < confidence_level < 1:
+        raise ValidationError("confidence_level must be finite and in (0, 1)")
+    shots = len(values)
+    if max_lag is None:
+        max_lag = min(shots - 1, max(1, int(10 * np.sqrt(shots))))
+    if (
+        isinstance(max_lag, bool)
+        or not isinstance(max_lag, (int, np.integer))
+        or not 1 <= max_lag < shots
+    ):
+        raise ValidationError("max_lag must be an integer in [1, shots)")
+    if (
+        isinstance(batches, bool)
+        or not isinstance(batches, (int, np.integer))
+        or not 2 <= batches <= shots
+    ):
+        raise ValidationError("batches must be an integer in [2, shots]")
+
+    binary = values.astype(float, copy=False)
+    probability = float(np.mean(binary))
+    centered = binary - probability
+    variance = float(np.dot(centered, centered) / shots)
+    tau = 1.0
+    if variance > 0:
+        fft_size = 1 << (2 * shots - 1).bit_length()
+        spectrum = np.fft.rfft(centered, fft_size)
+        autocovariance = np.fft.irfft(spectrum * np.conj(spectrum), fft_size)[: max_lag + 1]
+        autocovariance /= np.arange(shots, shots - max_lag - 1, -1)
+        autocorrelation = autocovariance / autocovariance[0]
+        lag = 1
+        while lag <= max_lag:
+            pair_sum = float(autocorrelation[lag])
+            if lag + 1 <= max_lag:
+                pair_sum += float(autocorrelation[lag + 1])
+            if pair_sum <= 0:
+                break
+            tau += 2 * pair_sum
+            lag += 2
+    tau = max(1.0, tau)
+    effective = max(1.0, min(float(shots), shots / tau))
+    standard_error = float(np.sqrt(probability * (1 - probability) / effective))
+    z_score = float(norm.ppf(0.5 + confidence_level / 2))
+    denominator = 1 + z_score**2 / effective
+    center = (probability + z_score**2 / (2 * effective)) / denominator
+    half_width = (
+        z_score
+        / denominator
+        * np.sqrt(probability * (1 - probability) / effective + z_score**2 / (4 * effective**2))
+    )
+    interval = (max(0.0, float(center - half_width)), min(1.0, float(center + half_width)))
+    batch_estimates = np.asarray(
+        [float(np.mean(batch)) for batch in np.array_split(binary, batches)]
+    )
+    return CorrelatedBernoulliEstimate(
+        probability,
+        shots,
+        tau,
+        effective,
+        standard_error,
+        float(confidence_level),
+        interval,
+        int(max_lag),
+        batch_estimates,
     )
 
 
@@ -498,7 +650,7 @@ def locate_loss(
     if corrected[0][1] <= 0:
         raise ValidationError("the first checkpoint count must be positive")
     segments: dict[str, LossEstimate] = {}
-    for (left_name, left), (right_name, right) in zip(corrected, corrected[1:], strict=False):
+    for (left_name, left), (right_name, right) in pairwise(corrected):
         if right > left * (1 + 1e-9):
             raise ValidationError(
                 f"corrected count increases from {left_name!r} to {right_name!r}; "
