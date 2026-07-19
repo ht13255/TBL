@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 
 from ._runtime import ensure_cache_environment
-from .errors import OptionalDependencyError, ValidationError
+from .errors import OptionalDependencyError, SimulationError, ValidationError
 
 _DEFAULT_GPU_MIN_OPERATIONS = 16_000_000
 
@@ -181,9 +181,12 @@ class BatchPropagator:
             raise ValidationError("expected one state or a batch of states")
         if states_shape[-1] != self._matrix_shape[1]:
             raise ValidationError("state width must equal transfer-matrix width")
-        matrix_dtype = (
-            self._matrix.dtype if self._matrix is not None else self._device_matrix.dtype
-        )
+        if self._matrix is not None:
+            matrix_dtype = self._matrix.dtype
+        elif self._device_matrix is not None:
+            matrix_dtype = self._device_matrix.dtype
+        else:  # pragma: no cover - constructor always stores one representation
+            raise SimulationError("propagator has no transfer matrix")
         states_dtype = (
             amplitudes.dtype if hasattr(amplitudes, "dtype") else np.asarray(amplitudes).dtype
         )
