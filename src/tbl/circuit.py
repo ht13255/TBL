@@ -48,6 +48,8 @@ def permanent_batch(
         raise ValidationError("permanent_batch requires square trailing dimensions")
     if max_workspace_bytes < 1:
         raise ValidationError("max_workspace_bytes must be positive")
+    if not np.all(np.isfinite(array)):
+        raise ValidationError("permanent matrices must contain finite values")
     if array.dtype.kind in "biu":
         array = array.astype(np.float64)
     size = array.shape[-1]
@@ -135,6 +137,8 @@ class MatrixComponent:
         matrix = np.asarray(self.matrix, dtype=complex)
         if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
             raise ValidationError("component transfer matrix must be square")
+        if not np.all(np.isfinite(matrix)):
+            raise ValidationError("component transfer matrix must be finite")
         singular = np.linalg.svd(matrix, compute_uv=False)
         if singular.size and singular.max() > 1 + 1e-9:
             raise ValidationError("passive transfer matrix cannot have singular value above one")
@@ -158,6 +162,8 @@ class SpectralMatrixComponent:
     def __post_init__(self) -> None:
         wavelengths = np.asarray(self.wavelengths, dtype=float)
         matrices = np.asarray(self.matrices, dtype=complex)
+        if not np.all(np.isfinite(wavelengths)) or not np.all(np.isfinite(matrices)):
+            raise ValidationError("spectral wavelengths and matrices must be finite")
         if wavelengths.ndim != 1 or wavelengths.size < 2:
             raise ValidationError("spectral component needs at least two wavelengths")
         if np.any(wavelengths <= 0) or np.any(np.diff(wavelengths) <= 0):
@@ -292,6 +298,10 @@ class LinearOpticalCircuit:
         time: float = 0.0,
         wavelength: float | None = None,
     ) -> np.ndarray:
+        if isinstance(time_bin, bool) or not isinstance(time_bin, (int, np.integer)):
+            raise ValidationError("time_bin must be an integer")
+        if not np.isfinite(time) or (wavelength is not None and not np.isfinite(wavelength)):
+            raise ValidationError("time and wavelength must be finite")
         transfer = np.eye(self.modes, dtype=complex)
         for component in self.components:
             if isinstance(component, DynamicBeamSplitter):
@@ -301,7 +311,9 @@ class LinearOpticalCircuit:
                 reflectivity = component.reflectivity
             else:
                 reflectivity = None
-            if reflectivity is not None:
+            if isinstance(component, (BeamSplitter, DynamicBeamSplitter)):
+                if reflectivity is None:  # pragma: no cover - narrowing invariant
+                    raise SimulationError("beam splitter reflectivity was not resolved")
                 transmission_amplitude = sqrt(1 - reflectivity)
                 reflection_amplitude = sqrt(reflectivity)
                 mode_a, mode_b = component.mode_a, component.mode_b
@@ -316,15 +328,15 @@ class LinearOpticalCircuit:
                 )
                 continue
             if isinstance(component, PhaseShifter):
-                selected = range(self.modes) if component.modes is None else component.modes
-                selected = list(selected)
+                selected: list[int] = list(
+                    range(self.modes) if component.modes is None else component.modes
+                )
                 if selected and (min(selected) < 0 or max(selected) >= self.modes):
                     raise ValidationError("phase shifter addresses a mode outside the circuit")
                 transfer[selected] *= np.exp(1j * component.phase)
                 continue
             if isinstance(component, LossChannel):
-                selected = range(self.modes) if component.modes is None else component.modes
-                selected = list(selected)
+                selected = list(range(self.modes) if component.modes is None else component.modes)
                 if selected and (min(selected) < 0 or max(selected) >= self.modes):
                     raise ValidationError("loss channel addresses a mode outside the circuit")
                 transfer[selected] *= sqrt(component.transmission)
@@ -334,16 +346,25 @@ class LinearOpticalCircuit:
                     component.reference_wavelength if wavelength is None else wavelength
                 )
                 local = component.matrix_at(selected_wavelength)
-            else:
+            elif isinstance(component, MatrixComponent):
                 local = component.matrix
+            else:  # pragma: no cover - LinearComponent is a closed union
+                raise SimulationError(f"unsupported component {type(component).__name__}")
             transfer = local @ transfer
         return transfer
 
-    def propagate(self, amplitudes: Sequence[complex], **timing: float | int) -> np.ndarray:
+    def propagate(
+        self,
+        amplitudes: Sequence[complex],
+        *,
+        time_bin: int = 0,
+        time: float = 0.0,
+        wavelength: float | None = None,
+    ) -> np.ndarray:
         state = np.asarray(amplitudes, dtype=complex)
         if state.shape != (self.modes,):
             raise ValidationError("amplitudes must contain one value per circuit mode")
-        return self.transfer_matrix(**timing) @ state
+        return self.transfer_matrix(time_bin=time_bin, time=time, wavelength=wavelength) @ state
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,7 +381,7 @@ class FockDistribution:
     def normalized(self) -> dict[tuple[int, ...], float]:
         survival = self.survival_probability
         if survival == 0:
-            return {key: 0.0 for key in self.probabilities}
+            return dict.fromkeys(self.probabilities, 0.0)
         return {key: value / survival for key, value in self.probabilities.items()}
 
     def sample(
@@ -376,8 +397,8 @@ class FockDistribution:
         total = sum(weights)
         if total <= 0:
             raise SimulationError("distribution has no probability mass")
-        weights = np.asarray(weights, dtype=float) / total
-        counts = np.random.default_rng(seed).multinomial(shots, weights)
+        weight_array = np.asarray(weights, dtype=float) / total
+        counts = np.random.default_rng(seed).multinomial(shots, weight_array)
         return {label: int(count) for label, count in zip(labels, counts, strict=True)}
 
 
@@ -475,10 +496,7 @@ class FockSimulator:
         permutation_count = len(permutation_indices)
         bytes_per_output = max(
             1,
-            permutation_count
-            * photon_count
-            * photon_count
-            * submatrices.dtype.itemsize,
+            permutation_count * photon_count * photon_count * submatrices.dtype.itemsize,
         )
         output_chunk = max(1, max_workspace_bytes // bytes_per_output)
         totals = np.empty(len(submatrices), dtype=complex)
@@ -559,6 +577,7 @@ class FockSimulator:
                     ]
                 )
             )
+        photon_wavelengths: list[float | None]
         if wavelengths is not None:
             photon_wavelengths = [float(value) for value in wavelengths]
             if len(photon_wavelengths) != photon_count:
@@ -598,12 +617,8 @@ class FockSimulator:
             values = permanent_batch(abs(submatrices) ** 2).real / output_factors
         elif partial_method == "mean":
             bosonic_permanents = permanent_batch(submatrices)
-            bosonic_values = abs(bosonic_permanents) ** 2 / (
-                input_factor * output_factors
-            )
-            classical_values = (
-                permanent_batch(abs(submatrices) ** 2).real / output_factors
-            )
+            bosonic_values = abs(bosonic_permanents) ** 2 / (input_factor * output_factors)
+            classical_values = permanent_batch(abs(submatrices) ** 2).real / output_factors
             values = (
                 pair_indistinguishability * bosonic_values
                 + (1 - pair_indistinguishability) * classical_values
