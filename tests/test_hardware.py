@@ -63,6 +63,38 @@ def test_fiber_loop_applies_db_loss_dispersion_and_records_provenance():
     assert output[0].photon.wavepacket.arrival_time == pytest.approx(output[0].time)
 
 
+def test_fiber_loop_environment_is_common_to_simultaneous_photons():
+    simultaneous = [event(shot=0), event(shot=1)]
+    shared = opt.FiberLoop(
+        10e-9,
+        transmission=1,
+        outcoupling=1,
+        max_roundtrips=1,
+        phase_drift_std=0.4,
+        fiber_length=1000,
+        pmd_coefficient=2e-12,
+        shared_environment=True,
+    ).process(simultaneous, np.random.default_rng(222), opt.SimulationContext(1e-9))
+    assert shared[0].time == pytest.approx(shared[1].time)
+    assert shared[0].amplitude == pytest.approx(shared[1].amplitude)
+    assert shared[0].metadata["loop_phase_drift_rad"] == pytest.approx(
+        shared[1].metadata["loop_phase_drift_rad"]
+    )
+
+    independent = opt.FiberLoop(
+        10e-9,
+        transmission=1,
+        outcoupling=1,
+        max_roundtrips=1,
+        phase_drift_std=0.4,
+        fiber_length=1000,
+        pmd_coefficient=2e-12,
+        shared_environment=False,
+    ).process(simultaneous, np.random.default_rng(222), opt.SimulationContext(1e-9))
+    assert independent[0].time != pytest.approx(independent[1].time)
+    assert independent[0].amplitude != pytest.approx(independent[1].amplitude)
+
+
 def test_feedforward_latency_and_eom_switch():
     rng = np.random.default_rng(3)
     context = opt.SimulationContext(1e-9)
@@ -123,22 +155,79 @@ def test_snspd_pixels_latency_quantization_and_avalanche_metadata():
     detector = opt.SNSPD(
         efficiency=1,
         jitter=0,
-        dead_time=10e-9,
+        dead_time=0,
         channel=3,
-        number_resolving=True,
         detection_latency=0.3e-9,
         time_tagger_resolution=1e-9,
     )
     tags = detector.detect(
-        [event(1.2e-9), event(1.2e-9)],
+        [event(1.2e-9)],
         acquisition_start=0,
         acquisition_end=20e-9,
         rng=np.random.default_rng(33),
     )
-    assert len(tags) == 2
+    assert len(tags) == 1
     assert all(tag.time == pytest.approx(2e-9) for tag in tags)
-    assert {tag.metadata["detector_pixel"] for tag in tags} == {0, 1}
+    assert {tag.metadata["detector_pixel"] for tag in tags} == {0}
     assert all(tag.metadata["true_time_s"] == pytest.approx(1.2e-9) for tag in tags)
+
+
+def test_multipixel_snspd_has_physical_collision_statistics():
+    pairs = 20_000
+    detector = opt.SNSPD(
+        efficiency=1,
+        jitter=0,
+        dead_time=10e-9,
+        pixel_count=4,
+    )
+    arrivals = [event(index * 20e-9, shot=index) for index in range(pairs) for _ in range(2)]
+    tags = detector.detect(
+        arrivals,
+        acquisition_start=0,
+        acquisition_end=pairs * 20e-9,
+        rng=np.random.default_rng(330),
+    )
+    # Two photons routed uniformly to four pixels produce 2 detections with
+    # probability 3/4 and one detection with probability 1/4.
+    assert len(tags) / pairs == pytest.approx(1.75, abs=0.015)
+    per_shot = np.bincount([tag.shot for tag in tags], minlength=pairs)
+    assert set(np.unique(per_shot)).issubset({1, 2})
+
+
+def test_multipixel_routing_weights_and_afterpulses_stay_on_parent_pixel():
+    detector = opt.SNSPD(
+        efficiency=1,
+        jitter=0,
+        dead_time=0,
+        pixel_count=4,
+        pixel_weights=(0.1, 0.2, 0.3, 0.4),
+    )
+    arrivals = [event(index * 1e-9, shot=index) for index in range(50_000)]
+    tags = detector.detect(
+        arrivals,
+        acquisition_start=0,
+        acquisition_end=50_000e-9,
+        rng=np.random.default_rng(331),
+    )
+    pixels = np.bincount([tag.metadata["detector_pixel"] for tag in tags], minlength=4) / len(tags)
+    assert pixels == pytest.approx((0.1, 0.2, 0.3, 0.4), abs=0.006)
+
+    afterpulsing = opt.SNSPD(
+        efficiency=1,
+        jitter=0,
+        dead_time=1e-9,
+        pixel_count=4,
+        afterpulse_probability=1,
+        afterpulse_time_constant=2e-9,
+    )
+    after_tags = afterpulsing.detect(
+        [event(0.0)],
+        acquisition_start=0,
+        acquisition_end=30e-9,
+        rng=np.random.default_rng(332),
+    )
+    assert len(after_tags) > 1
+    assert len({tag.metadata["detector_pixel"] for tag in after_tags}) == 1
 
 
 def test_snspd_recovery_afterpulse_and_wavelength_efficiency():
@@ -218,6 +307,32 @@ def test_default_acquisition_window_includes_propagation_tail():
     result = twin.run(1, seed=2)
     assert len(result.time_tags) == 1
     assert result.time_tags[0].time == pytest.approx(20e-9)
+
+
+def test_detector_substreams_are_order_independent_and_stable_when_array_grows():
+    arrivals = [event(index * 10e-9, mode=0, shot=index) for index in range(5000)]
+    first = opt.SNSPD(efficiency=0.51, jitter=2e-12, dead_time=0, channel=7)
+    unused = opt.SNSPD(efficiency=0.2, jitter=0, dead_time=0, channel=8)
+
+    only = opt.DetectorArray({0: first}).detect(
+        arrivals,
+        acquisition_start=0,
+        acquisition_end=50_000e-9,
+        rng=np.random.default_rng(900),
+    )
+    extended = opt.DetectorArray({1: unused, 0: first}).detect(
+        arrivals,
+        acquisition_start=0,
+        acquisition_end=50_000e-9,
+        rng=np.random.default_rng(900),
+    )
+    reordered = opt.DetectorArray({0: first, 1: unused}).detect(
+        arrivals,
+        acquisition_start=0,
+        acquisition_end=50_000e-9,
+        rng=np.random.default_rng(900),
+    )
+    assert only == extended == reordered
 
 
 def test_correlated_source_digital_twin_resets_hidden_state_for_seed():
