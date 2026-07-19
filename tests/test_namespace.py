@@ -1,4 +1,5 @@
 import importlib
+import importlib.metadata
 import sys
 
 import pytest
@@ -11,7 +12,8 @@ def test_tbl_is_canonical_namespace_and_legacy_import_remains_compatible():
     with pytest.warns(DeprecationWarning, match="now named 'tbl'"):
         legacy = importlib.import_module("openphotontwin")
     legacy_circuit = importlib.import_module("openphotontwin.circuit")
-    assert tbl.__version__ == "2.0.0"
+    assert tbl.__version__ == "2.2.0"
+    assert importlib.metadata.version("tbl") == tbl.__version__
     assert legacy.__version__ == tbl.__version__
     assert legacy.Wavepacket is tbl.Wavepacket
     assert legacy.circuit is legacy_circuit
