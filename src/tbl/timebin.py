@@ -52,8 +52,25 @@ class CoherentTimeBinLoop:
     phase_correlation_time: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.time_bins < 1 or self.round_trip_bins < 1:
+        if (
+            isinstance(self.time_bins, bool)
+            or isinstance(self.round_trip_bins, bool)
+            or not isinstance(self.time_bins, (int, np.integer))
+            or not isinstance(self.round_trip_bins, (int, np.integer))
+            or self.time_bins < 1
+            or self.round_trip_bins < 1
+        ):
             raise ValidationError("time_bins and round_trip_bins must be positive integers")
+        finite = (
+            self.bin_width,
+            self.round_trip_transmission,
+            self.coupler_transmission,
+            self.switching_time,
+            self.phase_noise_std,
+            self.phase_correlation_time,
+        )
+        if not all(np.isfinite(value) for value in finite):
+            raise ValidationError("coherent-loop scalar parameters must be finite")
         if self.bin_width <= 0:
             raise ValidationError("bin_width must be positive")
         _probability("round_trip_transmission", self.round_trip_transmission)
@@ -65,8 +82,23 @@ class CoherentTimeBinLoop:
         if isinstance(self.reflectivity, (int, float)):
             _probability("reflectivity", float(self.reflectivity))
         elif isinstance(self.reflectivity, Mapping):
+            if any(
+                isinstance(key, bool) or not isinstance(key, (int, np.integer))
+                for key in self.reflectivity
+            ):
+                raise ValidationError("reflectivity schedule keys must be integer time bins")
             for value in self.reflectivity.values():
                 _probability("scheduled reflectivity", value)
+        if isinstance(self.phase, (int, float)) and not np.isfinite(self.phase):
+            raise ValidationError("phase must be finite")
+        if isinstance(self.phase, Mapping) and (
+            any(
+                isinstance(key, bool) or not isinstance(key, (int, np.integer))
+                for key in self.phase
+            )
+            or not all(np.isfinite(value) for value in self.phase.values())
+        ):
+            raise ValidationError("phase schedule keys and values must be finite integer bins")
 
     @staticmethod
     def _piecewise(schedule: ScalarSchedule, index: int, time: float) -> float:
@@ -162,9 +194,7 @@ class CoherentTimeBinLoop:
             (self.time_bins + self.round_trip_bins, self.time_bins), dtype=complex
         )
         external_attenuation = sqrt(self.coupler_transmission)
-        loop_attenuation = sqrt(
-            self.coupler_transmission * self.round_trip_transmission
-        )
+        loop_attenuation = sqrt(self.coupler_transmission * self.round_trip_transmission)
         for index in range(self.time_bins):
             reflection = sqrt(reflectivities[index])
             transmission = sqrt(1 - reflectivities[index])
@@ -173,9 +203,7 @@ class CoherentTimeBinLoop:
             transfer[index, index] += external_attenuation * transmission
             loop_output = loop_attenuation * transmission * loop_input
             loop_output[index] += loop_attenuation * 1j * reflection
-            loop_arrivals[index + self.round_trip_bins] += (
-                np.exp(1j * phases[index]) * loop_output
-            )
+            loop_arrivals[index + self.round_trip_bins] += np.exp(1j * phases[index]) * loop_output
         # Each recurrence step is a lossy two-port unitary, so passivity follows
         # analytically from the validated transmissions and reflectivities.
         # Avoiding an O(N^3) SVD keeps matrix construction itself O(N^2).
@@ -183,8 +211,8 @@ class CoherentTimeBinLoop:
 
     def propagate(self, amplitudes: Sequence[complex], *, seed: int | None = None) -> np.ndarray:
         state = np.asarray(amplitudes, dtype=complex)
-        if state.shape != (self.time_bins,):
-            raise ValidationError("amplitudes must contain one value per time bin")
+        if state.shape != (self.time_bins,) or not np.all(np.isfinite(state)):
+            raise ValidationError("amplitudes must be finite with one value per time bin")
         return self.transfer_matrix(seed=seed) @ state
 
     def simulate(
@@ -193,8 +221,8 @@ class CoherentTimeBinLoop:
         """Propagate one coherent state and separate tail energy from true loss."""
 
         state = np.asarray(amplitudes, dtype=complex)
-        if state.shape != (self.time_bins,):
-            raise ValidationError("amplitudes must contain one value per time bin")
+        if state.shape != (self.time_bins,) or not np.all(np.isfinite(state)):
+            raise ValidationError("amplitudes must be finite with one value per time bin")
         output, residual = self._propagate_with_traces(
             state, self._reflectivity_trace(), self.phase_trace(seed=seed)
         )
