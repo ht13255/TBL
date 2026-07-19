@@ -31,9 +31,7 @@ def test_permanent_known_values():
 def test_vectorized_glynn_permanents_match_independent_ryser_reference():
     rng = np.random.default_rng(20260716)
     for size in range(8):
-        matrices = rng.normal(size=(4, size, size)) + 1j * rng.normal(
-            size=(4, size, size)
-        )
+        matrices = rng.normal(size=(4, size, size)) + 1j * rng.normal(size=(4, size, size))
         expected = np.asarray([_ryser_reference(matrix) for matrix in matrices])
         batched = opt.permanent_batch(matrices, max_workspace_bytes=512)
         assert batched == pytest.approx(expected, rel=2e-11, abs=2e-11)
