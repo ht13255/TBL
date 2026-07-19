@@ -1,5 +1,72 @@
 # Changelog
 
+## 2.2.0 — 2026-07-17
+
+- Added a pulsed SPDC/SFWM pair source with real-valued effective Schmidt mode
+  count, exact multimode-thermal pair statistics, spectral-purity propagation,
+  pump energy-conservation checks, correlated timing, and independent arm loss.
+- Added normalized nonuniform Schmidt-weight spectra with exact convolution of
+  per-mode thermal statistics, direct sampling, measured spectral purity, and
+  general product-form herald probabilities.
+- Added analytic threshold-herald conditioning with single-pair and multipair
+  fractions, conditional mean, explicit infinite-tail control, and exact pair
+  mean/variance/g2 observables.
+- Added heralded SPDC HOM observables with exact multipair Fock output
+  statistics, false-herald vacuum, collection loss, threshold-detector
+  saturation, signal/herald dark clicks, and independently checked partial
+  distinguishability limits.
+- Replaced optimistic “most recovered pixel” routing with calibrated stochastic
+  pixel weights, physical same-pixel collisions, and parent-pixel afterpulsing.
+- Added mode/channel-keyed detector RNG substreams so array order or an unused
+  detector cannot perturb an existing channel's stochastic realization.
+- Made loop phase noise and phenomenological PMD common to photons traversing
+  in the same time bin, preventing artificial loss of simultaneous-photon
+  indistinguishability; retained an explicit independent-ensemble mode.
+- Added FFT/initial-positive-sequence autocorrelation diagnostics, effective
+  sample size, batch means, and adjusted Wilson intervals so correlated blinking
+  or drift data are not reported with invalid iid confidence intervals.
+- Added causal exponential spontaneous-emission wavepackets, analytic
+  exponential/exponential and Gaussian/exponential overlaps, and schema-2
+  research bundles while retaining schema-1 Gaussian read compatibility.
+- Vectorized exact Gaussian, exponential, and mixed-profile delay scans while
+  preserving scalar closed-form results; a 4,001-point exponential HOM scan
+  measured roughly three orders of magnitude faster than the former per-point
+  object loop.
+- Added a publication-oriented validation report mapping physical claims to
+  independent analytic limits, numerical falsification tests, stochastic
+  tolerances, package checks, and explicitly excluded validity regimes.
+- Standardized the entire Python tree with Ruff formatting and stricter
+  maintainability rules, clarified small control-flow constructs, grouped
+  examples by workflow, and moved immutable benchmark data under
+  `benchmarks/results/`.
+
+## 2.1.0 — 2026-07-16
+
+- Added a versioned run manifest with configuration and result SHA-256 hashes,
+  SI units, RNG details, acquisition bounds, and environment/dependency versions.
+- Added lossless, pickle-free compressed research bundles with full event,
+  wavepacket, detector, nested metadata, round-trip, and integrity restoration.
+- Added in-memory mutation detection, malformed bundle-shape validation, and
+  finite acquisition/time-bin contracts.
+- Isolated source, component, and detector random streams with a versioned
+  SeedSequence policy, and recorded entropy even for initially unseeded runs.
+- Added per-shot detector probability estimates with exact Clopper-Pearson
+  confidence intervals for finite Monte Carlo acquisitions.
+- Closed non-finite-value paths across hardware timing, phases, controls,
+  detector parameters, S-parameter matrices, permanents, and acquisition input.
+- Protected canonical time-tag CSV/DataFrame columns from collisions with
+  user-supplied metadata keys.
+- Separated always-on configuration provenance from optional in-memory payload
+  sealing, while making research-bundle saves seal automatically; this avoids
+  imposing event-wise hashing cost on exploratory Monte Carlo sweeps.
+- Versioned and accelerated payload sealing with a platform-independent binary
+  numerical encoding and canonical repeated-metadata cache.
+- Added a typed-package marker, clean mypy gate, Python 3.10-3.13 CI matrix,
+  wheel-content audit, dependency monitoring, contribution standards, citation
+  metadata, and a publication-oriented reproducibility guide.
+- Tightened component-union, detector-routing, and CPU/GPU state boundaries
+  exposed by static analysis without changing numerical behavior.
+
 ## 2.0.0 — 2026-07-16
 
 - Renamed the canonical distribution and import namespace to `TBL` / `tbl`;
