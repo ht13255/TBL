@@ -10,6 +10,49 @@ The benchmark uses fixed random seeds, warmups, garbage-collection control,
 and median wall time. TBL 2.0.0 was measured on Windows with Python 3.12,
 NumPy 2.5.1, and an NVIDIA GTX 1060 3 GB.
 
+## TBL 2.2.0 source, correlation, and wavepacket models
+
+The 2.2.0 run used Windows 10, Python 3.12.13, NumPy 2.5.1, SciPy 1.18.0,
+an Intel family-6 model-94 CPU, and the same GTX 1060. The JSON now embeds
+this environment descriptor rather than relying only on surrounding prose.
+
+| Workload | TBL 2.2.0 median | Note |
+|---|---:|---|
+| 1,000,000 multimode-thermal SPDC pair counts | 85.4 ms | real-\(K\) Gamma-Poisson sampling |
+| SPDC event objects for 100,000 pump pulses | 115.9 ms | signal/idler loss and metadata included |
+| 101-point heralded SPDC HOM scan | 85.8 ms | multipairs, losses, and threshold detectors |
+| Correlation-adjusted uncertainty, 200,000 shots | 42.4 ms | FFT autocovariance and Geyer truncation |
+| 20,000 scalar mixed-profile overlaps | 216.7 ms | Gaussian/exponential complex `erfcx` integral |
+| 20,000-point mixed-profile delay scan | 5.911 ms | vectorized exact complex integral |
+| 4,001-point exponential HOM scan | 0.175 ms | about 1,000x faster than the former scalar scan loop |
+| 50,000-shot digital twin | 0.710 s | configuration provenance included |
+| GPU batch, 2048x128 | 4.271 ms | cached device-resident execution |
+
+The vectorized HOM path was checked point-by-point against scalar closed-form
+overlaps for unequal Gaussian, unequal exponential, and both mixed-profile
+orders. Raw timings and all samples are stored in
+`results/results_2_2_0.json`.
+
+## TBL 2.1.0 research architecture
+
+| Workload | TBL 2.1.0 median | Comparison |
+|---|---:|---:|
+| 20 permanents, 9x9 | 1.191 ms | 83.2x faster than 1.1.0 |
+| 5 photons / 7 modes Fock distribution | 1.048 ms | 278.1x faster than 1.1.0 |
+| 4 photons / 5 modes, exact partial overlap | 3.051 ms | 93.4x faster than 1.1.0 |
+| 256-bin coherent loop matrix | 4.818 ms | 56.1x faster than 1.1.0 |
+| 64-mode / 210-component transfer matrix | 2.690 ms | 15.3x faster than dense composition |
+| 50,000-shot digital twin with configuration provenance | 0.520 s | 3.4x faster than 1.1.0 |
+| Seal an existing 50,000-shot result | 1.241 s | full event/tag/metadata SHA-256 |
+| CPU batch, 2048x128 | 5.200 ms | 7.2% faster than the legacy copy path |
+| GPU batch, 2048x128 | 4.268 ms | cached device-resident GTX 1060 execution |
+
+Configuration provenance is always recorded. Full payload sealing is measured
+separately because exploratory sweeps do not need to hash every event; an
+`integrity=True` run or `save_bundle` performs that explicit work. The binary-v1
+sealing path is roughly three times faster than the first canonical-JSON
+prototype. Raw samples are stored in `results/results_2_1_0.json`.
+
 ## TBL 2.0.0
 
 | Workload | TBL 2.0.0 median | Comparison |
@@ -34,7 +77,7 @@ original 1.1.0 baseline.
 Beam splitters, phase shifters, and loss channels now update transfer-matrix
 rows directly. The benchmark also computes the old dense component matrices
 and asserts numerical equivalence before timing the 13.9x speedup. Raw samples
-are stored in `results_2_0_0.json`.
+are stored in `results/results_2_0_0.json`.
 
 ## Historical TBL 1.2.0 results
 
@@ -62,4 +105,4 @@ remained on-device. At 128 modes x 2048 states, device-resident execution was
 18.8x faster and a full host round trip was 1.49x faster. Pascal-class
 complex128 only reached host-round-trip parity around 256 million multiplies,
 which is why `auto` applies a 16x higher double-precision threshold. Detailed
-measurements are in `results_gpu_1_2_0.json`.
+measurements are in `results/results_gpu_1_2_0.json`.
