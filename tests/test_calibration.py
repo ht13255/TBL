@@ -5,6 +5,49 @@ import pytest
 import tbl as opt
 
 
+def test_exact_binomial_estimate_handles_boundaries_and_finite_samples():
+    zero = opt.estimate_binomial(0, 10)
+    half = opt.estimate_binomial(5, 10)
+    one = opt.estimate_binomial(10, 10)
+    assert zero.probability == 0
+    assert zero.interval == pytest.approx((0.0, 0.3084971078))
+    assert half.interval[0] < 0.5 < half.interval[1]
+    assert half.standard_error == pytest.approx(np.sqrt(0.25 / 10))
+    assert one.interval == pytest.approx((0.6915028922, 1.0))
+
+
+@pytest.mark.parametrize("successes,trials", [(-1, 10), (11, 10), (1.2, 10), (1, 0)])
+def test_binomial_estimate_rejects_nonphysical_counts(successes, trials):
+    with pytest.raises(opt.ValidationError):
+        opt.estimate_binomial(successes, trials)
+
+
+def test_correlated_bernoulli_estimator_distinguishes_iid_and_sticky_series():
+    rng = np.random.default_rng(602)
+    iid = rng.random(200_000) < 0.3
+    iid_estimate = opt.estimate_correlated_bernoulli(iid, max_lag=1000)
+    assert iid_estimate.probability == pytest.approx(0.3, abs=0.004)
+    assert iid_estimate.integrated_autocorrelation_time < 1.2
+    assert iid_estimate.effective_sample_size > 0.8 * len(iid)
+
+    sticky = np.empty(200_000, dtype=bool)
+    sticky[0] = rng.random() < 0.3
+    for index in range(1, len(sticky)):
+        sticky[index] = sticky[index - 1] if rng.random() < 0.98 else rng.random() < 0.3
+    correlated = opt.estimate_correlated_bernoulli(sticky, max_lag=5000)
+    naive = np.sqrt(correlated.probability * (1 - correlated.probability) / len(sticky))
+    assert correlated.integrated_autocorrelation_time > 40
+    assert correlated.effective_sample_size < len(sticky) / 40
+    assert correlated.standard_error > 6 * naive
+    assert correlated.interval[0] <= correlated.probability <= correlated.interval[1]
+
+
+@pytest.mark.parametrize("outcomes", [[0], [0, 2], [0, np.nan]])
+def test_correlated_bernoulli_estimator_rejects_invalid_series(outcomes):
+    with pytest.raises(opt.ValidationError):
+        opt.estimate_correlated_bernoulli(outcomes)
+
+
 def test_hom_scan_visibility_and_sampled_counts():
     packet = opt.Wavepacket(temporal_width=20e-12)
     scan = opt.hom_scan(
@@ -112,12 +155,8 @@ def test_time_tag_csv_and_coincidence_histogram(tmp_path):
 
 
 def test_coincidence_histogram_centers_zero_delay_and_preserves_bin_width():
-    tags = pd.DataFrame(
-        {"time": [0.0, 0.0, 9e-12], "channel": [0, 1, 1], "shot": [0, 0, 0]}
-    )
-    histogram = opt.coincidence_histogram(
-        tags, 0, 1, bin_width=4e-12, max_delay=10e-12
-    )
+    tags = pd.DataFrame({"time": [0.0, 0.0, 9e-12], "channel": [0, 1, 1], "shot": [0, 0, 0]})
+    histogram = opt.coincidence_histogram(tags, 0, 1, bin_width=4e-12, max_delay=10e-12)
     zero = int(np.flatnonzero(histogram.bin_centers == 0.0)[0])
     assert histogram.counts[zero] == 1
     assert np.diff(histogram.bin_centers) == pytest.approx(4e-12)
