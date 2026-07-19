@@ -1,0 +1,6 @@
+include README.md CHANGELOG.md LICENSE CITATION.cff CONTRIBUTING.md pyproject.toml
+recursive-include docs *.md
+recursive-include examples *.py *.md
+recursive-include benchmarks *.py *.md *.json
+recursive-include tests *.py
+include src/tbl/py.typed
