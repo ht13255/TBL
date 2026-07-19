@@ -146,7 +146,7 @@ def from_sparameter_sweep(
                 raise ValidationError(f"S-parameters imply gain at wavelength index {index}")
             matrices[index] /= largest
     return LinearOpticalCircuit.from_spectral_transfer(
-        wavelength_array, matrices, name=name, extrapolate=extrapolate
+        wavelength_array.tolist(), matrices, name=name, extrapolate=extrapolate
     )
 
 
