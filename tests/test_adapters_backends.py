@@ -1,3 +1,5 @@
+from typing import ClassVar
+
 import numpy as np
 import pytest
 
@@ -78,7 +80,7 @@ def test_strawberry_fields_duck_typed_import():
 
     class Program:
         num_subsystems = 2
-        circuit = [Command(BSgate(), [0, 1]), Command(Rgate(), [0])]
+        circuit: ClassVar = [Command(BSgate(), [0, 1]), Command(Rgate(), [0])]
 
     circuit = opt.from_strawberry_fields(Program())
     assert circuit.transfer_matrix().shape == (2, 2)
