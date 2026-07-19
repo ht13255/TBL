@@ -6,19 +6,21 @@ The package is designed to run without a GUI and can be imported directly from P
 
 > Python 3.10+ · NumPy/SciPy · MIT License
 
-Current release: **2.0.0**
+Current release: **2.2.0**
 
 ## Highlights
 
-- Chirped Gaussian photons with analytic delay, detuning, polarization, purity, and dispersion
+- Chirped Gaussian and causal exponential photons with analytic delay, detuning, polarization, purity, and overlap
 - Exact full-Gram-matrix partial distinguishability, including multiphoton overlap phases
 - Wavelength-resolved measured transfer matrices and per-photon S-parameter interpolation
 - Beam splitters, dynamic beam splitters, phase shifts, delay lines, loss, and phase drift
 - Time-bin qubits and fiber loops with dB/km loss, insertion loss, beta2 dispersion, PMD, and Wiener phase noise
 - Sources with measured g2(0), collection loss, Markov blinking, and OU spectral diffusion
+- SPDC/SFWM sources with multimode-thermal pair tails, Schmidt purity, and herald statistics
 - EOM insertion loss, drive noise, extinction ratio, rise time, and FPGA feed-forward latency
 - Chronological SNSPD avalanches with recovery, pixels, wavelength response, jitter tails, afterpulses, and tagger resolution
 - HOM-dip scans, coincidence histograms, photon-number distributions, and experiment comparison
+- Heralded SPDC HOM scans with multipairs, false heralds, arm loss, threshold saturation, and dark clicks
 - CSV time tags, Poisson HOM fitting, bootstrap/Fisher uncertainty, loss intervals, and loss localization
 - Optional adapters for Perceval, Strawberry Fields, and GDSFactory/SAX-style S-parameters
 - NumPy CPU backend with optional cached, device-resident CuPy batch propagation
@@ -63,6 +65,37 @@ compatibility shim and emit a `DeprecationWarning`. New code, documentation,
 type annotations, and package metadata should use `tbl`. The compatibility
 alias `OpenPhotonTwinError` remains available, while `TBLError` is the
 canonical base exception.
+
+## Research reproducibility
+
+`DigitalTwin.run` records a versioned manifest containing the complete model
+configuration, seed and RNG, acquisition window, SI units, runtime versions,
+and separate SHA-256 fingerprints for configuration and result data. A complete
+run can be stored without pickle and verified after transfer:
+
+```python
+result = twin.run(100_000, seed=2026, integrity=True)
+result.save_bundle("run.npz")
+
+restored = tbl.load_simulation_result("run.npz")
+assert restored.verify_integrity()
+print(restored.manifest.configuration_sha256)
+```
+
+Per-shot click probabilities include exact finite-sample confidence intervals:
+
+```python
+estimate = result.detection_probability(channel=0, confidence_level=0.95)
+print(estimate.probability, estimate.interval)
+```
+
+For exploratory sweeps, omit `integrity=True`; configuration provenance is
+still recorded and `save_bundle` automatically computes the full payload hash.
+The bundle preserves propagated events, wavepackets, complex amplitudes,
+detector tags, nested metadata, units, and provenance. See
+[`docs/reproducibility.md`](docs/reproducibility.md) for the publication
+checklist, callable portability rules, and dependency-version caveats. Cite a
+release using [`CITATION.cff`](CITATION.cff).
 
 ## Repeated CPU/GPU propagation
 
@@ -215,6 +248,45 @@ run = twin.run(10_000, seed=42)
 run.save_time_tags("time_tags.csv")
 ```
 
+## SPDC/SFWM photon-pair source
+
+`SPDCSource` samples the full multimode-thermal pair distribution rather than
+truncating at two photons. It checks central-frequency energy conservation and
+reports threshold-herald multipair contamination:
+
+```python
+source = tbl.SPDCSource(
+    repetition_rate=80e6,
+    mean_pairs=0.08,
+    schmidt_number=2.4,
+    pump_wavelength=775e-9,
+    signal_wavepacket=tbl.Wavepacket(wavelength=1550e-9),
+    idler_wavepacket=tbl.Wavepacket(wavelength=1550e-9),
+    signal_collection_efficiency=0.72,
+    idler_collection_efficiency=0.68,
+)
+
+heralded = source.heralded_statistics(herald_efficiency=0.85)
+print(heralded.herald_probability)
+print(heralded.multipair_fraction)
+
+hom = tbl.heralded_spdc_hom_scan(
+    np.linspace(-150e-12, 150e-12, 101),
+    source,
+    source,
+    herald_detector_efficiencies=(0.85, 0.85),
+    signal_detector_efficiencies=(0.82, 0.82),
+)
+print(hom.visibility, hom.coincidence_probability.min())
+```
+
+The effective Schmidt model reproduces `Var(n)=mu+mu**2/K`, marginal
+`g2=1+1/K`, and reduced single-photon spectral purity `1/K`. Supply measured
+nonuniform mode populations with `schmidt_weights=(...)`; TBL then convolves
+the exact per-mode thermal distributions and uses
+`purity=sum(weight**2)`. Schmidt weights do not contain mode shapes or phases,
+so supply measured overlap matrices when the full joint spectrum matters.
+
 ## Experimental data and calibration
 
 TBL accepts CSV time tags with at least `time` and `channel` columns. The optional `shot` column can preserve acquisition grouping.
@@ -253,6 +325,8 @@ All times are in seconds, lengths in meters, and frequencies in SI units. Random
 
 The governing equations, parameter conventions, validity regimes, and known
 limitations are documented in [`docs/physics-model.md`](docs/physics-model.md).
+The publication-oriented numerical evidence and claim-to-test mapping are in
+[`docs/validation-report.md`](docs/validation-report.md).
 
 ## Development and testing
 
@@ -263,8 +337,26 @@ python -m pytest
 python -m ruff check .
 ```
 
-Runnable examples are available in [`examples/`](examples). The canonical implementation is in [`src/tbl/`](src/tbl/), with tests in [`tests/`](tests).
+Runnable examples are indexed in [`examples/README.md`](examples/README.md).
+The canonical implementation is in [`src/tbl/`](src/tbl/), with tests in
+[`tests/`](tests).
 Release changes are listed in [`CHANGELOG.md`](CHANGELOG.md).
+
+The repository layout is intentionally small and conventional:
+
+```text
+src/tbl/                 importable implementation
+src/openphotontwin/      legacy compatibility shim
+tests/                   module-aligned regression tests
+examples/
+  interference/          HOM and Fock-interference workflows
+  hardware/              loop, control, and detector workflows
+  sources/               source-statistics workflows
+  research/              calibration and result-bundle workflows
+docs/                    physics, reproducibility, and validation
+benchmarks/              benchmark programs
+benchmarks/results/      immutable release measurements
+```
 
 ## License
 
