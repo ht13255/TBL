@@ -5,6 +5,7 @@ Monte Carlo hardware digital twin for time-bin and fiber-loop experiments.
 """
 
 from ._runtime import configure_matplotlib
+from ._version import __version__
 from .adapters import (
     from_perceval,
     from_sax_model,
@@ -21,8 +22,10 @@ from .backends import (
     synchronize,
 )
 from .calibration import (
+    BinomialEstimate,
     CalibrationResult,
     CoincidenceHistogram,
+    CorrelatedBernoulliEstimate,
     HOMBootstrap,
     HOMFit,
     LossEstimate,
@@ -34,6 +37,8 @@ from .calibration import (
     coincidence_histogram,
     compare_to_ideal,
     estimate_accidental_coincidences,
+    estimate_binomial,
+    estimate_correlated_bernoulli,
     estimate_loss,
     fit_hom_dip,
     load_time_tags,
@@ -71,7 +76,13 @@ from .errors import (
     TBLError,
     ValidationError,
 )
-from .experiments import HOMResult, hom_probabilities, hom_scan
+from .experiments import (
+    HeraldedHOMResult,
+    HOMResult,
+    heralded_spdc_hom_scan,
+    hom_probabilities,
+    hom_scan,
+)
 from .models import (
     CorrelatedPhotonSource,
     Photon,
@@ -80,19 +91,22 @@ from .models import (
     TimeBinQubit,
     Wavepacket,
 )
+from .research import RunManifest, load_simulation_result, result_sha256
 from .simulator import DigitalTwin, SimulationResult
+from .sources import HeraldedStatistics, PairNumberDistribution, SPDCSource
 from .timebin import CoherentLoopResult, CoherentTimeBinLoop
 
-__version__ = "2.0.0"
-
 __all__ = [
+    "SNSPD",
     "ArrayBackend",
     "BatchPropagator",
     "BeamSplitter",
+    "BinomialEstimate",
     "CalibrationResult",
-    "CoincidenceHistogram",
     "CoherentLoopResult",
     "CoherentTimeBinLoop",
+    "CoincidenceHistogram",
+    "CorrelatedBernoulliEstimate",
     "CorrelatedPhotonSource",
     "DelayLine",
     "DetectorArray",
@@ -106,6 +120,8 @@ __all__ = [
     "HOMBootstrap",
     "HOMFit",
     "HOMResult",
+    "HeraldedHOMResult",
+    "HeraldedStatistics",
     "LinearOpticalCircuit",
     "LossChannel",
     "LossEstimate",
@@ -114,14 +130,16 @@ __all__ = [
     "ModelComparison",
     "OpenPhotonTwinError",
     "OptionalDependencyError",
+    "PairNumberDistribution",
     "PhaseDrift",
     "PhaseShifter",
     "Photon",
     "PhotonEvent",
+    "RunManifest",
+    "SPDCSource",
     "SimulationContext",
     "SimulationError",
     "SimulationResult",
-    "SNSPD",
     "SinglePhotonSource",
     "SpectralMatrixComponent",
     "TBLError",
@@ -130,6 +148,7 @@ __all__ = [
     "TimeTag",
     "ValidationError",
     "Wavepacket",
+    "__version__",
     "auto_calibrate",
     "bootstrap_hom_fit",
     "calibration_report",
@@ -138,6 +157,8 @@ __all__ = [
     "compare_to_ideal",
     "configure_matplotlib",
     "estimate_accidental_coincidences",
+    "estimate_binomial",
+    "estimate_correlated_bernoulli",
     "estimate_loss",
     "fit_hom_dip",
     "from_perceval",
@@ -146,13 +167,16 @@ __all__ = [
     "from_sparameters",
     "from_strawberry_fields",
     "get_backend",
+    "heralded_spdc_hom_scan",
     "hom_probabilities",
     "hom_scan",
+    "load_simulation_result",
     "load_time_tags",
     "locate_loss",
     "permanent",
     "permanent_batch",
     "propagate_batch",
+    "result_sha256",
     "synchronize",
     "tags_to_dataframe",
     "thermo_optic_phase",
