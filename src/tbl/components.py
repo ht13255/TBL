@@ -21,8 +21,10 @@ class SimulationContext:
     start_time: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.time_bin_width <= 0:
-            raise ValidationError("time_bin_width must be positive")
+        if not np.isfinite(self.time_bin_width) or self.time_bin_width <= 0:
+            raise ValidationError("time_bin_width must be positive and finite")
+        if not np.isfinite(self.start_time):
+            raise ValidationError("start_time must be finite")
 
     def bin_at(self, time: float) -> int:
         return int(np.floor((time - self.start_time) / self.time_bin_width + 1e-12))
@@ -48,6 +50,8 @@ class LossChannel:
 
     def __post_init__(self) -> None:
         _probability("transmission", self.transmission)
+        if self.modes is not None and any(mode < 0 for mode in self.modes):
+            raise ValidationError("loss-channel modes must be non-negative")
 
     def process(
         self,
@@ -59,8 +63,7 @@ class LossChannel:
         return [
             event
             for event in events
-            if self.modes is not None
-            and event.mode not in self.modes
+            if (self.modes is not None and event.mode not in self.modes)
             or rng.random() < self.transmission
         ]
 
@@ -74,8 +77,12 @@ class DelayLine:
     modes: frozenset[int] | None = None
 
     def __post_init__(self) -> None:
+        if not np.isfinite(self.delay) or not np.isfinite(self.jitter):
+            raise ValidationError("delay and jitter must be finite")
         if self.delay < 0 or self.jitter < 0:
             raise ValidationError("delay and jitter must be non-negative")
+        if self.modes is not None and any(mode < 0 for mode in self.modes):
+            raise ValidationError("delay-line modes must be non-negative")
 
     def process(
         self,
@@ -88,8 +95,7 @@ class DelayLine:
             if self.jitter:
                 delays = self.delay + rng.normal(0.0, self.jitter, len(events))
                 return [
-                    event.shifted(float(delay))
-                    for event, delay in zip(events, delays, strict=True)
+                    event.shifted(float(delay)) for event, delay in zip(events, delays, strict=True)
                 ]
             return [event.shifted(self.delay) for event in events]
         result: list[PhotonEvent] = []
@@ -108,6 +114,12 @@ class PhaseShifter:
 
     phase: float
     modes: frozenset[int] | None = None
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.phase):
+            raise ValidationError("phase must be finite")
+        if self.modes is not None and any(mode < 0 for mode in self.modes):
+            raise ValidationError("phase-shifter modes must be non-negative")
 
     def process(
         self,
@@ -142,6 +154,8 @@ class BeamSplitter:
         if self.mode_a == self.mode_b or min(self.mode_a, self.mode_b) < 0:
             raise ValidationError("beam-splitter modes must be distinct and non-negative")
         _probability("reflectivity", self.reflectivity)
+        if not np.isfinite(self.phase):
+            raise ValidationError("beam-splitter phase must be finite")
 
     def unitary(self, modes: int, reflectivity: float | None = None) -> np.ndarray:
         if modes <= max(self.mode_a, self.mode_b):
@@ -198,11 +212,16 @@ class DynamicBeamSplitter(BeamSplitter):
 
     def __post_init__(self) -> None:
         BeamSplitter.__post_init__(self)
-        if self.switching_time < 0:
-            raise ValidationError("switching_time cannot be negative")
+        if not np.isfinite(self.switching_time) or self.switching_time < 0:
+            raise ValidationError("switching_time must be finite and non-negative")
         if isinstance(self.schedule, (int, float)):
             _probability("schedule", float(self.schedule))
         elif isinstance(self.schedule, Mapping):
+            if any(
+                isinstance(key, bool) or not isinstance(key, (int, np.integer))
+                for key in self.schedule
+            ):
+                raise ValidationError("schedule keys must be integer time bins")
             for value in self.schedule.values():
                 _probability("scheduled reflectivity", value)
 
@@ -247,10 +266,14 @@ class FeedForwardController:
     _commands: list[tuple[float, float]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if not all(np.isfinite(value) for value in (self.latency, self.jitter, self.default)):
+            raise ValidationError("feed-forward parameters must be finite")
         if self.latency < 0 or self.jitter < 0:
             raise ValidationError("feed-forward latency and jitter must be non-negative")
 
     def trigger(self, time: float, value: float, rng: np.random.Generator | None = None) -> float:
+        if not np.isfinite(time) or not np.isfinite(value):
+            raise ValidationError("feed-forward trigger time and value must be finite")
         noise = 0.0
         if self.jitter and rng is not None:
             noise = float(rng.normal(0.0, self.jitter))
@@ -262,8 +285,8 @@ class FeedForwardController:
     def value_at(self, time: float, rise_time: float = 0.0) -> float:
         """Return the control value, linearly interpolating finite transitions."""
 
-        if rise_time < 0:
-            raise ValidationError("rise_time cannot be negative")
+        if not np.isfinite(time) or not np.isfinite(rise_time) or rise_time < 0:
+            raise ValidationError("time and rise_time must be finite, with rise_time non-negative")
         previous = self.default
         for effective, value in self._commands:
             if time < effective:
@@ -294,6 +317,15 @@ class EOMSwitch:
     def __post_init__(self) -> None:
         if self.mode_a == self.mode_b or min(self.mode_a, self.mode_b) < 0:
             raise ValidationError("switch modes must be distinct and non-negative")
+        finite = (
+            self.rise_time,
+            self.control_latency,
+            self.extinction_ratio_db,
+            self.transmission,
+            self.drive_noise_std,
+        )
+        if not all(np.isfinite(value) for value in finite):
+            raise ValidationError("switch parameters must be finite")
         if self.rise_time < 0 or self.control_latency < 0 or self.extinction_ratio_db < 0:
             raise ValidationError("switch timing and extinction ratio must be non-negative")
         _probability("transmission", self.transmission)
@@ -303,10 +335,14 @@ class EOMSwitch:
     def _control_value(self, time: float) -> float:
         query_time = time - self.control_latency
         if isinstance(self.control, FeedForwardController):
-            return self.control.value_at(query_time, self.rise_time)
-        if callable(self.control):
-            return float(self.control(query_time))
-        return float(self.control)
+            value = self.control.value_at(query_time, self.rise_time)
+        elif callable(self.control):
+            value = float(self.control(query_time))
+        else:
+            value = float(self.control)
+        if not np.isfinite(value):
+            raise ValidationError("switch control returned a non-finite value")
+        return value
 
     def process(
         self,
@@ -349,6 +385,8 @@ class PhaseDrift:
     independent_by_mode: bool = False
 
     def __post_init__(self) -> None:
+        if not np.isfinite(self.standard_deviation) or not np.isfinite(self.reference_time):
+            raise ValidationError("phase-drift scale must be finite")
         if self.standard_deviation < 0 or self.reference_time <= 0:
             raise ValidationError("invalid phase-drift scale")
 
@@ -392,6 +430,16 @@ class TemperaturePhaseDrift:
     modes: frozenset[int] | None = None
 
     def __post_init__(self) -> None:
+        parameters = (
+            self.length,
+            self.wavelength,
+            self.reference_temperature,
+            self.thermo_optic_coefficient,
+        )
+        if not all(np.isfinite(value) for value in parameters):
+            raise ValidationError("thermo-optic parameters must be finite")
+        if not callable(self.temperature) and not np.isfinite(self.temperature):
+            raise ValidationError("temperature must be finite")
         if self.length < 0 or self.wavelength <= 0:
             raise ValidationError("length must be non-negative and wavelength positive")
 
@@ -410,6 +458,8 @@ class TemperaturePhaseDrift:
             temperature = (
                 self.temperature(event.time) if callable(self.temperature) else self.temperature
             )
+            if not np.isfinite(temperature):
+                raise ValidationError("temperature callable returned a non-finite value")
             phase = thermo_optic_phase(
                 self.length,
                 self.wavelength,
@@ -439,13 +489,38 @@ class FiberLoop:
     insertion_loss_db: float = 0.0
     dispersion_beta2: float = 0.0
     pmd_coefficient: float = 0.0
+    shared_environment: bool = True
 
     def __post_init__(self) -> None:
+        finite = (
+            self.round_trip_time,
+            self.transmission,
+            self.phase_per_roundtrip,
+            self.phase_drift_std,
+            self.length_error,
+            self.group_velocity,
+            self.attenuation_db_per_km,
+            self.insertion_loss_db,
+            self.dispersion_beta2,
+            self.pmd_coefficient,
+        )
+        if not all(np.isfinite(value) for value in finite):
+            raise ValidationError("fiber-loop parameters must be finite")
+        if self.fiber_length is not None and not np.isfinite(self.fiber_length):
+            raise ValidationError("fiber_length must be finite")
         if self.round_trip_time <= 0 or self.max_roundtrips < 1:
             raise ValidationError("round_trip_time must be positive and max_roundtrips >= 1")
         _probability("transmission", self.transmission)
         if isinstance(self.outcoupling, (int, float)):
             _probability("outcoupling", float(self.outcoupling))
+        elif isinstance(self.outcoupling, Mapping):
+            if any(
+                isinstance(key, bool) or not isinstance(key, (int, np.integer)) or key < 0
+                for key in self.outcoupling
+            ):
+                raise ValidationError("outcoupling keys must be non-negative round trips")
+            for value in self.outcoupling.values():
+                _probability("outcoupling", value)
         if self.phase_drift_std < 0 or self.group_velocity <= 0:
             raise ValidationError("invalid fiber-loop drift or group velocity")
         if self.fiber_length is not None and self.fiber_length <= 0:
@@ -471,8 +546,33 @@ class FiberLoop:
         rng: np.random.Generator,
         context: SimulationContext,
     ) -> list[PhotonEvent]:
-        del context
         result: list[PhotonEvent] = []
+        phase_by_bin: dict[int, float] = {}
+        pmd_by_bin: dict[int, float] = {}
+
+        def environmental_noise(time: float, length: float) -> tuple[float, float]:
+            if not self.shared_environment:
+                drift = (
+                    float(rng.normal(0.0, self.phase_drift_std)) if self.phase_drift_std else 0.0
+                )
+                pmd = (
+                    float(rng.normal(0.0, self.pmd_coefficient * sqrt(length)))
+                    if self.pmd_coefficient
+                    else 0.0
+                )
+                return drift, pmd
+            time_bin = context.bin_at(time)
+            if time_bin not in phase_by_bin:
+                phase_by_bin[time_bin] = (
+                    float(rng.normal(0.0, self.phase_drift_std)) if self.phase_drift_std else 0.0
+                )
+                pmd_by_bin[time_bin] = (
+                    float(rng.normal(0.0, self.pmd_coefficient * sqrt(length)))
+                    if self.pmd_coefficient
+                    else 0.0
+                )
+            return phase_by_bin[time_bin], pmd_by_bin[time_bin]
+
         corrected_delay = self.round_trip_time + self.length_error / self.group_velocity
         if corrected_delay <= 0:
             raise ValidationError("length_error makes the effective round-trip time non-positive")
@@ -493,16 +593,12 @@ class FiberLoop:
             for roundtrip in range(1, self.max_roundtrips + 1):
                 if rng.random() >= effective_transmission:
                     break
-                drift = rng.normal(0.0, self.phase_drift_std) if self.phase_drift_std else 0.0
-                pmd_delay = (
-                    rng.normal(0.0, self.pmd_coefficient * sqrt(length))
-                    if self.pmd_coefficient
-                    else 0.0
-                )
+                traversal_time = current.time + corrected_delay
+                drift, pmd_delay = environmental_noise(traversal_time, length)
                 packet = current.photon.wavepacket
                 if self.dispersion_beta2:
                     packet = packet.dispersed(self.dispersion_beta2 * length)
-                new_time = current.time + corrected_delay + pmd_delay
+                new_time = traversal_time + pmd_delay
                 packet = packet._copy_with(arrival_time=new_time)
                 photon = replace(current.photon, wavepacket=packet)
                 metadata = dict(current.metadata)
@@ -535,6 +631,11 @@ def thermo_optic_phase(
 ) -> float:
     """Return phase drift caused by a temperature change in a waveguide/fiber."""
 
+    if not all(
+        np.isfinite(value)
+        for value in (length, wavelength, delta_temperature, thermo_optic_coefficient)
+    ):
+        raise ValidationError("thermo-optic inputs must be finite")
     if length < 0 or wavelength <= 0:
         raise ValidationError("length must be non-negative and wavelength positive")
     return 2 * pi * length * thermo_optic_coefficient * delta_temperature / wavelength
