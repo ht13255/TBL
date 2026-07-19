@@ -6,10 +6,14 @@ can compare the same workload without a benchmark framework dependency.
 
 from __future__ import annotations
 
+import argparse
 import gc
 import json
+import platform
 import statistics
 import time
+from importlib import metadata
+from pathlib import Path
 
 import numpy as np
 
@@ -77,8 +81,24 @@ def random_unitary(rng, modes):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="also save the complete JSON result to this path",
+    )
+    arguments = parser.parse_args()
     rng = np.random.default_rng(20260716)
-    results = {"version": opt.__version__}
+    results = {
+        "version": opt.__version__,
+        "environment": {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "processor": platform.processor(),
+            "numpy": np.__version__,
+            "scipy": metadata.version("scipy"),
+        },
+    }
 
     matrix = rng.normal(size=(9, 9)) + 1j * rng.normal(size=(9, 9))
     results["permanent_n9_x20"] = timed(
@@ -133,18 +153,14 @@ def main():
             elif isinstance(component, opt.PhaseShifter):
                 local = np.eye(component_circuit.modes, dtype=complex)
                 selected = (
-                    range(component_circuit.modes)
-                    if component.modes is None
-                    else component.modes
+                    range(component_circuit.modes) if component.modes is None else component.modes
                 )
                 for mode in selected:
                     local[mode, mode] *= np.exp(1j * component.phase)
             else:
                 local = np.eye(component_circuit.modes, dtype=complex)
                 selected = (
-                    range(component_circuit.modes)
-                    if component.modes is None
-                    else component.modes
+                    range(component_circuit.modes) if component.modes is None else component.modes
                 )
                 for mode in selected:
                     local[mode, mode] *= np.sqrt(component.transmission)
@@ -162,11 +178,71 @@ def main():
     )
 
     source = opt.SinglePhotonSource(repetition_rate=20e6, p_single=0.7, p_double=0.01)
-    detector = opt.DetectorArray(
-        {0: opt.SNSPD(efficiency=0.82, jitter=15e-12, dead_time=30e-9)}
-    )
+    detector = opt.DetectorArray({0: opt.SNSPD(efficiency=0.82, jitter=15e-12, dead_time=30e-9)})
     twin = opt.DigitalTwin(source, [opt.DelayLine(5e-9)], detector)
     results["digital_twin_50k"] = timed(lambda: twin.run(50_000, seed=8), repeats=3)
+    unsealed_result = twin.run(50_000, seed=8)
+    results["digital_twin_seal_50k"] = timed(unsealed_result.seal, repeats=3)
+
+    spdc = opt.SPDCSource(mean_pairs=0.08, schmidt_number=2.4)
+    results["spdc_pair_counts_1m"] = timed(
+        lambda: spdc.sample_pair_counts(1_000_000, np.random.default_rng(2201)),
+        repeats=5,
+    )
+    results["spdc_emit_100k"] = timed(
+        lambda: spdc.emit_many(100_000, np.random.default_rng(2202)),
+        repeats=5,
+    )
+    spdc_hom_delays = np.linspace(-150e-12, 150e-12, 101)
+    results["heralded_spdc_hom_101"] = timed(
+        lambda: opt.heralded_spdc_hom_scan(
+            spdc_hom_delays,
+            spdc,
+            spdc,
+            herald_detector_efficiencies=(0.85, 0.85),
+            signal_detector_efficiencies=(0.82, 0.82),
+            max_pairs=8,
+        ),
+        repeats=3,
+    )
+
+    markov_uniforms = rng.random(200_000)
+    correlated_clicks = np.empty(markov_uniforms.size, dtype=bool)
+    correlated_clicks[0] = True
+    for index in range(1, correlated_clicks.size):
+        transition = 0.015 if correlated_clicks[index - 1] else 0.035
+        correlated_clicks[index] = (
+            not correlated_clicks[index - 1]
+            if markov_uniforms[index] < transition
+            else correlated_clicks[index - 1]
+        )
+    results["correlated_bernoulli_200k"] = timed(
+        lambda: opt.estimate_correlated_bernoulli(correlated_clicks),
+        repeats=5,
+    )
+
+    gaussian_packet = opt.Wavepacket(temporal_width=22e-12, chirp=0.25)
+    exponential_packet = opt.Wavepacket.exponential(
+        40e-12, arrival_time=7e-12, wavelength=1549.8e-9
+    )
+    results["mixed_profile_overlap_x20k"] = timed(
+        lambda: [gaussian_packet.mode_overlap(exponential_packet) for _ in range(20_000)],
+        repeats=5,
+    )
+    mixed_delays = np.linspace(-400e-12, 400e-12, 20_000)
+    results["mixed_profile_scan_20k"] = timed(
+        lambda: gaussian_packet.indistinguishability_scan(exponential_packet, mixed_delays),
+        repeats=5,
+    )
+    hom_delays = np.linspace(
+        -8 * exponential_packet.temporal_width,
+        8 * exponential_packet.temporal_width,
+        4001,
+    )
+    results["exponential_hom_4001"] = timed(
+        lambda: opt.hom_scan(hom_delays, exponential_packet, exponential_packet),
+        repeats=5,
+    )
 
     batch_matrix = random_unitary(rng, 128)
     batch_states = rng.normal(size=(2048, 128)) + 1j * rng.normal(size=(2048, 128))
@@ -203,7 +279,11 @@ def main():
             iterations=10,
         )
 
-    print(json.dumps(results, indent=2))
+    payload = json.dumps(results, indent=2)
+    if arguments.output is not None:
+        arguments.output.parent.mkdir(parents=True, exist_ok=True)
+        arguments.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
 
 
 if __name__ == "__main__":
